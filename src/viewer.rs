@@ -11,7 +11,8 @@ fn color(level: &str) -> &'static str {
 }
 
 pub fn log(level: &str, msg: &str) {
-    println!("{}[{}] [{}] {}\x1b[0m", color(level), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(), level, msg);
+    let c = color(level);
+    println!("[{}] [{}{}\x1b[0m] {}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(), c, level, msg);
 }
 pub fn info(msg: &str) { log("INFO", msg); }
 pub fn warn(msg: &str) { log("WARN", msg); }
