@@ -1,9 +1,13 @@
 fn main() {
-    println!("VRM Engine started");
-    // Load a dummy VRM buffer
+    vrmengine::viewer::log("VRM Engine started");
+
     let dummy_data = b"dummy vrm data";
-    if let Err(e) = vrmengine::model::load_vrm(dummy_data) {
-        println!("Loader error (expected for dummy): {}", e);
+    match vrmengine::model::load_vrm(dummy_data) {
+        Ok(_) => vrmengine::viewer::log("Loader OK (dummy)"),
+        Err(e) => {
+            vrmengine::viewer::log(&format!("Loader error (expected for dummy): {}", e));
+        }
     }
+
     vrmengine::viewer::run();
 }
