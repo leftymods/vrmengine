@@ -32,7 +32,7 @@ impl VRMAnimation {
     }
 
     pub fn evaluate_expression(&self, time: f32) -> HashMap<String, f32> {
-        let mut result = HashMap::new();
+        let result = HashMap::new();
         let _t = time; // evaluation logic placeholder
         result
     }
