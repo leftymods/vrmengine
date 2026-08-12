@@ -1,4 +1,4 @@
-pub const VRMExpressionMaterialColorType: [(&str, &str); 6] = [
+pub const VRM_EXPRESSION_MATERIAL_COLOR_TYPE: [(&str, &str); 6] = [
     ("Color", "color"),
     ("EmissionColor", "emissionColor"),
     ("ShadeColor", "shadeColor"),
