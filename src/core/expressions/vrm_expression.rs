@@ -1,5 +1,3 @@
-use super::{PresetName, VRMExpressionPresetName};
-
 pub enum OverrideType {
     None,
     Block,
@@ -20,7 +18,7 @@ pub struct VRMExpression {
     pub override_blink: OverrideType,
     pub override_look_at: OverrideType,
     pub override_mouth: OverrideType,
-    pub binds: Vec<Boxdyn VRMExpressionBindTrait>>,
+    pub binds: Vec<Box<dyn VRMExpressionBindTrait>>,
 }
 
 impl VRMExpression {
@@ -36,7 +34,7 @@ impl VRMExpression {
         }
     }
 
-    pub fn add_bind(&mut self, bind: Boxdyn VRMExpressionBindTrait>) {
+    pub fn add_bind(&mut self, bind: Box<dyn VRMExpressionBindTrait>) {
         self.binds.push(bind);
     }
 

@@ -1,9 +1,9 @@
-use super::VRMExpression;
+use super::vrm_expression::VRMExpression;
 use std::collections::HashMap;
 
 pub struct VRMExpressionManager {
     pub expressions: Vec<VRMExpression>,
-    pub expression_map: HashMap<String, VRMExpression>,
+    pub expression_map: HashMap<String, usize>,
     pub blink_expression_names: Vec<String>,
     pub look_at_expression_names: Vec<String>,
     pub mouth_expression_names: Vec<String>,
@@ -21,12 +21,13 @@ impl VRMExpressionManager {
     }
 
     pub fn register_expression(&mut self, expression: VRMExpression) {
-        self.expression_map.insert(expression.expression_name.clone(), expression.clone());
+        let index = self.expressions.len();
+        self.expression_map.insert(expression.expression_name.clone(), index);
         self.expressions.push(expression);
     }
 
-    pub fn get_expression(&self, name: &str) -> OptionVRMExpression> {
-        self.expression_map.get(name).cloned()
+    pub fn get_expression(&self, name: &str) -> Option<&VRMExpression> {
+        self.expression_map.get(name).and_then(|&i| self.expressions.get(i))
     }
 
     pub fn get_value(&self, name: &str) -> Option<f32> {
@@ -34,8 +35,10 @@ impl VRMExpressionManager {
     }
 
     pub fn set_value(&mut self, name: &str, weight: f32) {
-        if let Some(e) = self.expression_map.get_mut(name) {
-            e.weight = weight.clamp(0.0, 1.0);
+        if let Some(&i) = self.expression_map.get(name) {
+            if let Some(e) = self.expressions.get_mut(i) {
+                e.weight = weight.clamp(0.0, 1.0);
+            }
         }
     }
 
@@ -46,15 +49,12 @@ impl VRMExpressionManager {
     }
 
     pub fn update(&mut self) {
-        // Calculate weight multipliers based on overrides
         let mut blink = 1.0f32;
         let mut look_at = 1.0f32;
         let mut mouth = 1.0f32;
 
         for expression in &self.expressions {
-            // Simplified override logic matching three-vrm
             let amount = if expression.is_binary && expression.weight > 0.5 { 1.0 } else { expression.weight };
-            // For simplicity, treat all expressions as possible overrides based on name
             if self.blink_expression_names.contains(&expression.expression_name) {
                 blink -= amount;
             }
@@ -69,7 +69,6 @@ impl VRMExpressionManager {
         look_at = look_at.max(0.0);
         mouth = mouth.max(0.0);
 
-        // Apply weights with multipliers
         for expression in &mut self.expressions {
             let mut multiplier = 1.0f32;
             let name = &expression.expression_name;

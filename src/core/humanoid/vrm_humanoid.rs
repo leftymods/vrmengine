@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use super::{VRMRig, VRMHumanBone, VRMHumanBoneName};
+use super::vrm_rig::{VRMRig, VRMHumanBone, Object3D};
 
 pub struct VRMHumanoid {
     pub auto_update_human_bones: bool,
@@ -17,12 +17,12 @@ impl VRMHumanoid {
         }
     }
 
-    pub fn get_normalized_bone(&self, name: &str) -> OptionVRMHumanBone> {
+    pub fn get_normalized_bone(&self, name: &str) -> Option<VRMHumanBone> {
         self.normalized_human_bones.get_bone(name)
     }
 
-    pub fn get_normalized_bone_node(&self, name: &str) -> Optionsuper::Object3D> {
-        self.get_normalized_bone(name).map(|b| b.node.clone())
+    pub fn get_normalized_bone_node(&self, name: &str) -> Option<Object3D> {
+        self.get_normalized_bone(name).map(|b| b.node)
     }
 
     pub fn update(&mut self) {
