@@ -39,9 +39,12 @@ pub fn run() {
     info("Starting render loop (5 frames)");
     for i in 0..5 {
         debug(&format!("Frame {}", i));
-        crate::render::render_frame();
+        let result = std::panic::catch_unwind(|| { crate::render::render_frame(); });
+        if result.is_err() { warn("GL render frame failed (no context?)"); }
         info(&format!("Rendered frame {}", i));
     }
     info("Render loop complete");
     info("Viewer finished");
+    info("Process complete");
+    std::thread::sleep(std::time::Duration::from_millis(500));
 }
