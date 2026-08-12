@@ -37,3 +37,17 @@ impl VRMAnimation {
         result
     }
 }
+
+impl VRMAnimation {
+    pub fn interpolate_expression(&self, name: &str, time: f32) -> f32 {
+        if let Some(track) = self.expression_tracks.custom.get(name) {
+            if track.is_empty() {
+                return 0.0;
+            }
+            // Simple linear interpolation placeholder
+            let t = (time % self.duration) / self.duration;
+            return t.clamp(0.0, 1.0);
+        }
+        0.0
+    }
+}

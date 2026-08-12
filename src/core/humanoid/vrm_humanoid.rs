@@ -1,10 +1,12 @@
 use std::collections::HashMap;
 use super::vrm_rig::{VRMRig, VRMHumanBone, Object3D};
+use crate::core::look_at::vrm_look_at::VRMLookAt;
 
 pub struct VRMHumanoid {
     pub auto_update_human_bones: bool,
     pub raw_human_bones: VRMRig,
     pub normalized_human_bones: VRMRig,
+    pub look_at: Option<VRMLookAt>,
 }
 
 impl VRMHumanoid {
@@ -14,6 +16,7 @@ impl VRMHumanoid {
             auto_update_human_bones: auto_update,
             raw_human_bones: raw.clone(),
             normalized_human_bones: raw,
+            look_at: None,
         }
     }
 
