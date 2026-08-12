@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use glam::Vec3;
 
 pub struct VRMAnimation {
     pub duration: f32,
@@ -49,5 +50,12 @@ impl VRMAnimation {
             return t.clamp(0.0, 1.0);
         }
         0.0
+    }
+}
+
+impl VRMAnimation {
+    pub fn interpolate_humanoid(&self, _bone_name: &str, time: f32) -> Option<(Vec3, Vec3, Vec3, [f32; 4])> {
+        let _t = (time % self.duration.max(0.001)) / self.duration.max(0.001);
+        Some((Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 0.0), [0.0, 0.0, 0.0, 1.0]))
     }
 }
