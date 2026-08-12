@@ -1,1 +1,1 @@
-pub const LOOK_AT_TYPE_NAMES: &[&str] = &["lookAt"];
+pub const LOOK_AT_TYPE_NAME: &str = "LookAt";
