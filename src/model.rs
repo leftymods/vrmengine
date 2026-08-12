@@ -2,6 +2,9 @@ use gltf::Gltf;
 use image::DynamicImage;
 
 pub fn load_vrm(data: &[u8]) -> Result<(), anyhow::Error> {
+    if data.len() < 4 || !data.starts_with(b"glTF") {
+        return Err(anyhow::anyhow!("Invalid VRM/GLTF data: expected binary glTF header (glTF)"));
+    }
     println!("Loading VRM model ({} bytes)", data.len());
     let doc = Gltf::from_slice(data)?;
     println!("glTF loaded: {} nodes, {} images", doc.document.nodes().len(), doc.document.images().len());
