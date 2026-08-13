@@ -5,7 +5,6 @@ pub fn render_frame() {
         gl::ClearColor(0.1, 0.1, 0.1, 1.0);
         gl::Clear(gl::COLOR_BUFFER_BIT);
     }
-    println!("Desktop shader render frame (GL cleared)");
 }
 
 pub fn run_headless() {
