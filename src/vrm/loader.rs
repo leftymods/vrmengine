@@ -263,24 +263,60 @@ fn parse_vrm1_meta(v: &Value) -> Vrm1Meta {
     }
 }
 
-fn parse_vrm1_humanoid(v: &Value, scene: &mut crate::scene::Scene) -> Result<Humanoid> {
-    let o = jobj(v).context("humanoid must be an object")?;
+/// Parse `humanBones` in both formats seen in the wild:
+/// - standard object map: `{ "hips": { "node": 1 }, ... }`
+/// - array form used by some exporters: `[ { "bone": "hips", "node": 1 }, ... ]`
+fn parse_human_bones(value: &Value, scene: &crate::scene::Scene) -> HumanBones {
     let mut bones: HumanBones = HashMap::new();
-
-    if let Some(human_bones) = get(o, "humanBones").and_then(jobj) {
-        for (name, value) in human_bones {
-            let Some(bone_name) = HumanBoneName::from_str(name) else {
-                continue;
-            };
-            let Some(node) = value.as_object().and_then(|bo| get(bo, "node")).and_then(ju32) else {
-                continue;
-            };
-            let node = node as usize;
-            if scene.nodes.get(node).is_some() {
-                bones.insert(bone_name, node);
+    let mut insert = |bone_name: HumanBoneName, node: usize| {
+        if scene.nodes.get(node).is_some() {
+            bones.insert(bone_name, node);
+        }
+    };
+    match value {
+        Value::Array(items) => {
+            for item in items {
+                let Some(o) = jobj(item) else {
+                    continue;
+                };
+                let Some(name) = get(o, "bone").and_then(jstr) else {
+                    continue;
+                };
+                let Some(bone_name) = HumanBoneName::from_str(name) else {
+                    continue;
+                };
+                let Some(node) = get(o, "node").and_then(ju32) else {
+                    continue;
+                };
+                insert(bone_name, node as usize);
             }
         }
+        Value::Object(map) => {
+            for (name, value) in map {
+                let Some(bone_name) = HumanBoneName::from_str(name) else {
+                    continue;
+                };
+                let Some(node) = value
+                    .as_object()
+                    .and_then(|bo| get(bo, "node"))
+                    .and_then(ju32)
+                else {
+                    continue;
+                };
+                insert(bone_name, node as usize);
+            }
+        }
+        _ => {}
     }
+    bones
+}
+
+fn parse_vrm1_humanoid(v: &Value, scene: &mut crate::scene::Scene) -> Result<Humanoid> {
+    let o = jobj(v).context("humanoid must be an object")?;
+    let bones = match get(o, "humanBones") {
+        Some(human_bones) => parse_human_bones(human_bones, scene),
+        None => HumanBones::new(),
+    };
 
     // required bones
     for required in HumanBoneName::REQUIRED {
@@ -580,22 +616,10 @@ fn parse_vrm0_meta(v: &Value) -> Vrm0Meta {
 
 fn parse_vrm0_humanoid(v: &Value, scene: &mut crate::scene::Scene) -> Result<Humanoid> {
     let o = jobj(v).context("humanoid must be an object")?;
-    let mut bones: HumanBones = HashMap::new();
-
-    if let Some(human_bones) = get(o, "humanBones").and_then(jobj) {
-        for (name, value) in human_bones {
-            let Some(bone_name) = HumanBoneName::from_str(name) else {
-                continue;
-            };
-            let Some(node) = value.as_object().and_then(|bo| get(bo, "node")).and_then(ju32) else {
-                continue;
-            };
-            let node = node as usize;
-            if scene.nodes.get(node).is_some() {
-                bones.insert(bone_name, node);
-            }
-        }
-    }
+    let bones = match get(o, "humanBones") {
+        Some(human_bones) => parse_human_bones(human_bones, scene),
+        None => HumanBones::new(),
+    };
 
     for required in HumanBoneName::REQUIRED {
         if !bones.contains_key(required) {
