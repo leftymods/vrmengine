@@ -106,10 +106,7 @@ impl GlutinWindowContext {
         let gl_context = not_current_gl_context.make_current(&gl_surface).unwrap();
 
         gl_surface
-            .set_swap_interval(
-                &gl_context,
-                glutin::surface::SwapInterval::Wait(NonZeroU32::MIN),
-            )
+            .set_swap_interval(&gl_context, glutin::surface::SwapInterval::DontWait)
             .unwrap();
 
         Self {
@@ -231,6 +228,21 @@ impl winit::application::ApplicationHandler<UserEvent> for App {
         let (gl_window, gl) = create_display(event_loop);
         let gl = Arc::new(gl);
         info("GL context created");
+        unsafe {
+            use glow::HasContext as _;
+            info(&format!(
+                "GL_VENDOR: {}",
+                gl.get_parameter_string(glow::VENDOR)
+            ));
+            info(&format!(
+                "GL_RENDERER: {}",
+                gl.get_parameter_string(glow::RENDERER)
+            ));
+            info(&format!(
+                "GL_VERSION: {}",
+                gl.get_parameter_string(glow::VERSION)
+            ));
+        }
         gl_window.window().set_visible(true);
         info("Window visible");
 
