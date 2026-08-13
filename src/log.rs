@@ -76,6 +76,7 @@ pub fn init() {
             Err(_) => None,
         };
         crate::crash::install(log_file);
+        drop(guard);
         let log_path = if let Ok(lf) = LOG_FILE.lock() {
             lf.as_ref().map(|f| log_path_of(f))
         } else {
