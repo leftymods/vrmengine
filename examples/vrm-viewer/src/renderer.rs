@@ -52,46 +52,23 @@ in vec3 vNormal;
 in vec3 vWorld;
 in vec2 vUv;
 
-const float PI = 3.14159265358979323846;
-
 uniform vec4 uColor;
 uniform sampler2D uTex;
 uniform int uHasTex;
 uniform vec3 uLightDir;
-uniform vec3 uKeyColor;
 uniform vec3 uLightColor;
-uniform vec3 uCameraPos;
 uniform int uDebugUv;
 uniform int uAlphaMode;
 uniform float uAlphaCutoff;
-
-uniform int uMtoon;
-uniform vec3 uShadeColor;
-uniform int uHasShadeTex;
-uniform sampler2D uShadeTex;
-uniform float uShadeShift;
-uniform float uShadeToony;
-uniform float uShadingGradeRate;
 uniform sampler2D uBumpTex;
 uniform int uHasBumpTex;
 uniform vec2 uNormalScale;
-uniform vec3 uRimColor;
-uniform float uRimPower;
-uniform float uRimLift;
-uniform float uRimMix;
-uniform float uIndirectLight;
-uniform vec3 uEmissionColor;
-uniform int uHasEmissionTex;
-uniform sampler2D uEmissionTex;
-uniform int uHasSphereTex;
-uniform sampler2D uSphereTex;
 
 out vec4 fragColor;
 
-// Rebuild a tangent frame from screen-space derivatives and perturb the
-// surface normal by a tangent-space normal map (three.js
-// `perturbNormal2Arb`). `_BumpMap` is what gives MToon its fine matte surface
-// detail; the smooth geometric normal alone reads as flat plastic.
+// Reconstruct a tangent frame from screen-space derivatives and perturb the
+// surface normal by a tangent-space normal map (three.js `perturbNormal2Arb`),
+// without requiring a tangent vertex attribute.
 vec3 perturbNormal2Arb(vec2 uv, vec3 pos, vec3 surf, vec3 mapN, float face) {
     vec3 q0 = dFdx(pos);
     vec3 q1 = dFdy(pos);
@@ -117,93 +94,44 @@ void main() {
     if (!gl_FrontFacing) n = -n;
     vec3 base = uHasTex == 1 ? texture(uTex, vUv).rgb : vec3(1.0);
     vec3 albedo = uColor.rgb * base;
-    vec3 keyDir = normalize(uLightDir);
-    vec3 viewDir = normalize(uCameraPos - vWorld);
-    float n_dot_l = dot(n, keyDir);
+    vec3 L = normalize(uLightDir);
+    float ndotl = dot(n, L);
 
-    // Tangent-space normal map (`_BumpMap`): the frame comes from position /
-    // uv derivatives, so no tangent vertex attribute is required.
+    // Tangent-space normal map (`_BumpMap`) for fine surface detail.
     if (uHasBumpTex == 1) {
         vec3 mapN = texture(uBumpTex, vUv).xyz * 2.0 - 1.0;
         mapN.xy *= uNormalScale;
         float faceDirection = gl_FrontFacing ? 1.0 : -1.0;
         n = perturbNormal2Arb(vUv, vWorld, n, mapN, faceDirection);
-        n_dot_l = dot(n, keyDir);
+        ndotl = dot(n, L);
     }
 
-    vec3 col;
-    {
-        // Hemisphere (sky/ground) fill used by the non-MToon path.
-        float sky = n.y * 0.5 + 0.5;
-        vec3 env = mix(vec3(0.16, 0.17, 0.20), vec3(0.95, 0.92, 0.88), sky);
-        float ndl = n_dot_l * 0.5 + 0.5;
-        float key = ndl * ndl;
-        vec3 light = env * 0.65 + uKeyColor * key;
-        vec3 pbr_col = albedo * light;
+    // Two-tone cel shading: a dark shade color on the shadow side and the
+    // full albedo on the lit side, split by a short smoothstep ramp on
+    // dot(N, L). The shade tone is forced to ~55% of the albedo so the band
+    // reads even when the model's `_ShadeTexture` equals its `_MainTex`.
+    vec3 shade = albedo * 0.55;
+    float ramp = smoothstep(-0.02, 0.08, ndotl);
+    vec3 lit = mix(shade, albedo, ramp) * uLightColor;
 
-        // -- Port of `bevy_shader_mtoon` (`mtoon.wgsl`) ---------------------
-        // Toon factor: dot(N, L) + shadeShift, mapped through a saturated
-        // LINEAR ramp (not a smoothstep) over [-1+toony, 1-toony]. The direct
-        // light is FLAT - mix(shade, albedo, shading) * lightColor, no N.L
-        // attenuation, no /PI, no min-clamp. The matte form comes from the
-        // hemisphere global-illumination term (normal-dependent, equalised
-        // toward the up/down average), which is what reads as soft cell
-        // shading instead of flat plastic or a glossy hotspot.
-        vec3 shade = uShadeColor
-            * (uHasShadeTex == 1 ? texture(uShadeTex, vUv).rgb : vec3(1.0));
-        float shading = dot(n, keyDir) + uShadeShift;
-        float lo = -1.0 + uShadeToony;
-        float hi = 1.0 - uShadeToony;
-        float f = hi <= lo
-            ? (shading >= hi ? 1.0 : 0.0)
-            : clamp((shading - lo) / (hi - lo), 0.0, 1.0);
-        vec3 mtoon_col = mix(shade, albedo, f) * uLightColor;
+    // Matte hemisphere fill (sky/ground) so the shaded side keeps form and
+    // never reads as flat plastic.
+    vec3 sky = vec3(0.22, 0.23, 0.26);
+    vec3 ground = vec3(0.09, 0.09, 0.11);
+    vec3 ambient = mix(ground, sky, n.y * 0.5 + 0.5) * albedo;
 
-        // Global illumination: a sky/ground hemisphere times the albedo,
-        // equalised toward the up/down average (bevy's `gi_equalization_factor`
-        // = 0 -> use the raw, normal-dependent GI so the model keeps matte
-        // form instead of reading as flat plastic).
-        vec3 gi_up = vec3(0.95, 0.92, 0.88) * albedo;
-        vec3 gi_down = vec3(0.40, 0.42, 0.46) * albedo;
-        vec3 raw_gi = mix(gi_down, gi_up, n.y * 0.5 + 0.5);
-        vec3 uniform_gi = (gi_up + gi_down) * 0.5;
-        mtoon_col += mix(raw_gi, uniform_gi, 0.0);
+    vec3 col = lit + ambient * 0.6;
 
-        // Emission.
-        mtoon_col += uEmissionColor
-            * (uHasEmissionTex == 1 ? texture(uEmissionTex, vUv).rgb : vec3(1.0));
-
-        // Rim lighting: additive matcap (sphere add) plus a parametric fresnel
-        // rim, modulated by `mix(1, lighting, rimLightingMix)` exactly as in
-        // bevy_shader_mtoon.
-        vec3 rim = vec3(0.0);
-        if (uHasSphereTex == 1) {
-            vec3 x = normalize(vec3(viewDir.z, 0.0, -viewDir.x));
-            vec3 y = cross(viewDir, x);
-            vec2 sphereUv = vec2(dot(x, n), dot(y, n)) * 0.495 + 0.5;
-            rim = texture(uSphereTex, sphereUv).rgb;
-        }
-        float parametric = clamp(1.0 - dot(n, viewDir) + uRimLift, 0.0, 1.0);
-        parametric = pow(parametric, max(uRimPower, 0.00001));
-        rim += parametric * uRimColor;
-        rim *= mix(vec3(1.0), mtoon_col, uRimMix);
-        mtoon_col += rim;
-
-        col = mix(pbr_col, mtoon_col, float(uMtoon));
-    }
-
-    // The default framebuffer is linear (not sRGB), so tonemap and
-    // gamma-encode here instead of relying on the GL surface.
-    col = col / (col + vec3(1.0));
-    col = pow(col, vec3(1.0 / 2.2));
+    // The default framebuffer is linear (not sRGB), so gamma-encode for
+    // display. No tonemapping is applied: the cel-lit value is already in
+    // display range.
+    col = pow(clamp(col, 0.0, 1.0), vec3(1.0 / 2.2));
 
     float texAlpha = uHasTex == 1 ? texture(uTex, vUv).a : 1.0;
     if (uAlphaMode == 1) {
-        // Mask: cut the surface at the alpha cutoff (hair fringes, lace).
         if (texAlpha < uAlphaCutoff) discard;
         fragColor = vec4(col, uColor.a);
     } else if (uAlphaMode == 2) {
-        // Blend: keep the texture alpha for translucency.
         fragColor = vec4(col, uColor.a * texAlpha);
     } else {
         fragColor = vec4(col, uColor.a);
