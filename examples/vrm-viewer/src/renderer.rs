@@ -130,9 +130,14 @@ void main() {
         // viewer. The flatness is what reads as matte cell shading instead of
         // a glossy sheen.
         vec3 irradiance =
-            mix(vec3(0.16, 0.17, 0.20), vec3(0.95, 0.92, 0.88), n.y * 0.5 + 0.5);
+            mix(vec3(0.40, 0.42, 0.46), vec3(0.95, 0.92, 0.88), n.y * 0.5 + 0.5);
         vec3 mtoon_col = uLightColor * mix(shade, albedo, f) / PI;
-        mtoon_col += uIndirectLight * irradiance * albedo / PI;
+        // The MToon indirect term normally comes from a scene-environment
+        // light probe; without one we approximate it with a sky/ground
+        // hemisphere, scaled up to the strength the reference viewer gets from
+        // its HDR cubemap so the model keeps matte form instead of reading as
+        // flat plastic.
+        mtoon_col += 0.45 * irradiance * albedo;
         mtoon_col = min(mtoon_col, albedo);
 
         // Parametric rim light (three-vrm adds it after the clamp, at full
