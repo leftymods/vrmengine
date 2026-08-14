@@ -46,6 +46,7 @@ pub struct MeshData {
     /// Material index into `doc.materials()`.
     pub material: usize,
     pub double_sided: bool,
+    /// True for `alphaMode == Blend` (drawn last in the transparent bucket).
     pub alpha: bool,
 }
 
@@ -157,7 +158,7 @@ pub fn extract(model: &LoadedModel) -> ViewModel {
 
             let material = primitive.material();
             let double_sided = material.double_sided();
-            let alpha = material.alpha_mode() != gltf::material::AlphaMode::Opaque;
+            let alpha = material.alpha_mode() == gltf::material::AlphaMode::Blend;
 
             for p in &base_positions {
                 let v = Vec3::from(*p);
@@ -238,6 +239,26 @@ impl ViewModel {
                     vertex.pos = mesh.base_positions[i];
                     vertex.normal = mesh.base_normals[i];
                 }
+            }
+            if std::env::var("VRM_VIEWER_DEBUG_MORPH").is_ok() && mesh.node == 91 {
+                let mut dbg_max = 0.0f32;
+                let mut moved = 0usize;
+                for (i, vertex) in mesh.vertices.iter().enumerate() {
+                    let d = (vertex.pos[0] - mesh.base_positions[i][0]).powi(2)
+                        + (vertex.pos[1] - mesh.base_positions[i][1]).powi(2)
+                        + (vertex.pos[2] - mesh.base_positions[i][2]).powi(2);
+                    if d > dbg_max {
+                        dbg_max = d;
+                    }
+                    if d > 1e-6 {
+                        moved += 1;
+                    }
+                }
+                eprintln!(
+                    "morph node=91 mat={} max_disp_sq={dbg_max:.6} moved={moved}/{}",
+                    mesh.material,
+                    mesh.vertices.len(),
+                );
             }
         }
     }

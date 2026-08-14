@@ -200,7 +200,15 @@ fn build_node_morph_count(doc: &gltf::Document, node_count: usize) -> Vec<usize>
             doc.nodes()
                 .nth(i)
                 .and_then(|node| node.mesh())
-                .map(|mesh| mesh.weights().map(|w| w.len()).unwrap_or(0))
+                .map(|mesh| {
+                    // The number of morph targets is the number of morph
+                    // targets on the (first) primitive, not the length of the
+                    // mesh's default weights (which exporters often omit).
+                    mesh.primitives()
+                        .next()
+                        .map(|primitive| primitive.morph_targets().count())
+                        .unwrap_or(0)
+                })
                 .unwrap_or(0)
         })
         .collect()

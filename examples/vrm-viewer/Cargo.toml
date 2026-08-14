@@ -8,6 +8,9 @@ publish = false
 vrm-engine = { path = "../../crates/vrm-engine" }
 glam = { workspace = true }
 gltf = { workspace = true }
-glow = "0.18"
+glow = "0.17"
 glutin = "0.32"
 winit = "0.30"
+egui = "0.36"
+egui-winit = "0.36"
+egui_glow = "0.36"

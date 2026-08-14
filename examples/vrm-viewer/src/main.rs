@@ -6,6 +6,7 @@
 //! - drag with left mouse button: orbit
 //! - drag with right mouse button: pan
 //! - scroll wheel: zoom
+//! - expression sliders in the "Expressions" panel
 //! - `1`..`=` : set a facial expression (happy, angry, sad, surprised,
 //!   relaxed, blink, neutral, aa, ih, ou, oh, ee)
 //! - `r`      : reset pose and expressions
@@ -36,7 +37,7 @@ use winit::window::{Window, WindowId};
 use camera::Camera;
 use model::ViewModel;
 use renderer::Renderer;
-use vrm_engine::{ExpressionPreset, LoadedModel};
+use vrm_engine::{ExpressionId, ExpressionPreset, LoadedModel};
 
 struct Viewer {
     window: Window,
@@ -53,6 +54,9 @@ struct Viewer {
     last_cursor: (f64, f64),
     fps_frames: u32,
     fps_time: f32,
+    egui_ctx: egui::Context,
+    egui_state: egui_winit::State,
+    egui_painter: egui_glow::Painter,
 }
 
 impl Viewer {
@@ -117,11 +121,23 @@ impl Viewer {
         let mut camera = Camera::default();
         camera.frame(view_model.aabb_min, view_model.aabb_max);
 
-        let renderer = Renderer::new(gl, &model.vrm.doc, &model.images);
+        let renderer = Renderer::new(std::sync::Arc::new(gl), &model.vrm.doc, &model.images);
         window.set_title(&format!(
             "vrm-viewer - {}",
             model_path(&model)
         ));
+
+        let egui_ctx = egui::Context::default();
+        let egui_state = egui_winit::State::new(
+            egui_ctx.clone(),
+            egui::ViewportId::ROOT,
+            &window.display_handle().unwrap(),
+            Some(window.scale_factor() as f32),
+            window.theme(),
+            None,
+        );
+        let egui_painter = egui_glow::Painter::new(renderer.gl_arc(), "", None, true)
+            .expect("egui painter");
 
         Self {
             window,
@@ -138,6 +154,9 @@ impl Viewer {
             last_cursor: (0.0, 0.0),
             fps_frames: 0,
             fps_time: 0.0,
+            egui_ctx,
+            egui_state,
+            egui_painter,
         }
     }
 
@@ -154,6 +173,7 @@ impl Viewer {
             self.size,
             dt,
         );
+        self.paint_ui();
         self.surface.swap_buffers(&self._context).ok();
 
         self.fps_frames += 1;
@@ -175,6 +195,62 @@ impl Viewer {
             .vrm
             .set_expression(&vrm_engine::ExpressionId::Preset(preset), weight);
         self.model.vrm.apply_expressions();
+    }
+
+    /// Render the egui overlay (expression sliders) on top of the 3D scene.
+    ///
+    /// Must be called with the default framebuffer bound, before
+    /// `swap_buffers`; `Renderer::render` resolves its MSAA target into that
+    /// framebuffer, and the egui painter draws on top of it.
+    fn paint_ui(&mut self) {
+        let raw_input = self.egui_state.take_egui_input(&self.window);
+        let mut changes: Vec<(ExpressionId, f32)> = Vec::new();
+        let mut reset = false;
+
+        let mut full_output = self.egui_ctx.run_ui(raw_input, |ui| {
+            egui::Window::new("Expressions")
+                .default_pos([8.0, 8.0])
+                .show(ui.ctx(), |ui| {
+                    for id in self.model.vrm.expressions.ids() {
+                        let name = id.name();
+                        let mut w = self.model.vrm.expression_weight(id);
+                        if ui
+                            .add(egui::Slider::new(&mut w, 0.0..=1.0).text(name))
+                            .changed()
+                        {
+                            changes.push((id.clone(), w));
+                        }
+                    }
+                    ui.separator();
+                    if ui.button("Reset all expressions").clicked() {
+                        reset = true;
+                    }
+                    ui.label("LMB orbit · RMB pan · wheel zoom");
+                    ui.label("1-0/-= expressions · r reset · Esc quit");
+                });
+        });
+
+        self.egui_state
+            .handle_platform_output(&self.window, full_output.platform_output);
+        let clipped = self
+            .egui_ctx
+            .tessellate(full_output.shapes, full_output.pixels_per_point);
+        let (width, height) = self.size;
+        self.egui_painter.paint_and_update_textures(
+            [width, height],
+            full_output.pixels_per_point,
+            &clipped,
+            &mut full_output.textures_delta,
+        );
+
+        if reset {
+            self.model.vrm.reset_expressions();
+        } else {
+            for (id, weight) in changes {
+                self.model.vrm.set_expression(&id, weight);
+            }
+            self.model.vrm.apply_expressions();
+        }
     }
 }
 
@@ -261,12 +337,63 @@ fn headless_render(path: &str, out_ppm: &str) {
             gl_display.get_proc_address(&c)
         })
     };
-    let mut renderer = Renderer::new(gl, &model.vrm.doc, &model.images);
+    let mut renderer = Renderer::new(std::sync::Arc::new(gl), &model.vrm.doc, &model.images);
     let mut view_model = model::extract(&model);
     let mut camera = Camera::default();
     camera.frame(view_model.aabb_min, view_model.aabb_max);
+    if let (Ok(y), Ok(p), Ok(d)) = (
+        std::env::var("VRM_VIEWER_YAW"),
+        std::env::var("VRM_VIEWER_PITCH"),
+        std::env::var("VRM_VIEWER_DIST"),
+    ) {
+        camera.yaw = y.parse().unwrap();
+        camera.pitch = p.parse().unwrap();
+        camera.dist = d.parse().unwrap();
+    }
 
     // Simulate a few frames so spring bones settle into a pose.
+    if let Ok(expr) = std::env::var("VRM_VIEWER_EXPRESSION") {
+        if let Some(id) = ExpressionId::preset(&expr) {
+            model.vrm.set_expression(&id, 1.0);
+            model.vrm.apply_expressions();
+            println!("expression {expr} applied");
+            for e in model.vrm.expressions.expressions() {
+                if e.id == id {
+                    println!(
+                        "  expr {} binds={} override={:?} is_binary={}",
+                        e.id,
+                        e.morph_binds.len(),
+                        e.override_blink,
+                        e.is_binary,
+                    );
+                    for b in &e.morph_binds {
+                        println!("    bind node={} morph={} weight={}", b.node, b.index, b.weight);
+                    }
+                }
+            }
+            println!(
+                "  nodes_with_weights:"
+            );
+            for n in 0..model.vrm.node_count() {
+                let w = model.vrm.morph_weights(n);
+                if let Some(w) = w {
+                    if w.iter().any(|&x| x != 0.0) {
+                        println!("  node {n} weights={w:?}");
+                    }
+                }
+            }
+            println!("  view model meshes (node, morphs):");
+            for m in &view_model.meshes {
+                println!(
+                    "    node={} morphs={}",
+                    m.node,
+                    m.morph_delta_pos.len(),
+                );
+            }
+        } else {
+            eprintln!("unknown expression preset: {expr}");
+        }
+    }
     for _ in 0..30 {
         step_and_render(
             &mut model,
@@ -330,6 +457,10 @@ impl ApplicationHandler for App {
         let Some(viewer) = &mut self.viewer else {
             return;
         };
+        let egui_consumed = viewer
+            .egui_state
+            .on_window_event(&viewer.window, &event)
+            .consumed;
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
@@ -342,14 +473,14 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::RedrawRequested => viewer.render_frame(),
-            WindowEvent::MouseInput { state, button, .. } => {
+            WindowEvent::MouseInput { state, button, .. } if !egui_consumed => {
                 viewer.dragging = if state == ElementState::Pressed {
                     Some(button)
                 } else {
                     None
                 };
             }
-            WindowEvent::CursorMoved { position, .. } => {
+            WindowEvent::CursorMoved { position, .. } if !egui_consumed => {
                 let dx = position.x - viewer.last_cursor.0;
                 let dy = position.y - viewer.last_cursor.1;
                 viewer.last_cursor = (position.x, position.y);
@@ -367,7 +498,7 @@ impl ApplicationHandler for App {
                     _ => {}
                 }
             }
-            WindowEvent::MouseWheel { delta, .. } => match delta {
+            WindowEvent::MouseWheel { delta, .. } if !egui_consumed => match delta {
                 MouseScrollDelta::LineDelta(_, y) => {
                     viewer.camera.dist =
                         (viewer.camera.dist * (1.0 - y * 0.1)).clamp(0.2, 50.0);
@@ -377,6 +508,9 @@ impl ApplicationHandler for App {
                         (viewer.camera.dist * (1.0 - p.y as f32 * 0.001)).clamp(0.2, 50.0);
                 }
             },
+            // Keyboard shortcuts must always work: egui consumes keys whenever
+            // a widget has keyboard focus (e.g. after clicking a slider), but
+            // that must not disable `1`..`=`/`r`.
             WindowEvent::KeyboardInput { event, .. } => {
                 if event.state != ElementState::Pressed {
                     return;

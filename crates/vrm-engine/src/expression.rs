@@ -315,7 +315,7 @@ impl Expression {
                 if index < 0 {
                     continue;
                 }
-                let weight = bind.weight.unwrap_or(1.0) as f32;
+                let weight = bind.weight.unwrap_or(1.0) as f32 / 100.0;
                 for node in doc.nodes() {
                     if node.mesh().map(|m| m.index()) == Some(mesh_index) {
                         out.morph_binds.push(MorphTargetBind {
