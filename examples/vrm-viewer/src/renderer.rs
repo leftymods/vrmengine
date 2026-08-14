@@ -72,6 +72,9 @@ uniform sampler2D uShadeTex;
 uniform float uShadeShift;
 uniform float uShadeToony;
 uniform float uShadingGradeRate;
+uniform sampler2D uBumpTex;
+uniform int uHasBumpTex;
+uniform vec2 uNormalScale;
 uniform vec3 uRimColor;
 uniform float uRimPower;
 uniform float uRimLift;
@@ -85,17 +88,107 @@ uniform sampler2D uSphereTex;
 
 out vec4 fragColor;
 
+// Rebuild a tangent frame from screen-space derivatives and perturb the
+// surface normal by a tangent-space normal map (three.js
+// `perturbNormal2Arb`). `_BumpMap` is what gives MToon its fine matte surface
+// detail; the smooth geometric normal alone reads as flat plastic.
+vec3 perturbNormal2Arb(vec2 uv, vec3 pos, vec3 surf, vec3 mapN, float face) {
+    vec3 q0 = dFdx(pos);
+    vec3 q1 = dFdy(pos);
+    vec2 st0 = dFdx(uv);
+    vec2 st1 = dFdy(uv);
+    vec3 N = normalize(surf);
+    vec3 q1perp = cross(q1, N);
+    vec3 q0perp = cross(N, q0);
+    vec3 T = q1perp * st0.x + q0perp * st1.x;
+    vec3 B = q1perp * st0.y + q0perp * st1.y;
+    if (length(T) == 0.0 || length(B) == 0.0) return surf;
+    float det = max(dot(T, T), dot(B, B));
+    float scale = det == 0.0 ? 0.0 : face * inversesqrt(det);
+    return normalize(T * (mapN.x * scale) + B * (mapN.y * scale) + N * mapN.z);
+}
+
 void main() {
     if (uDebugUv == 1) {
         fragColor = vec4(vUv, 0.0, 1.0);
         return;
     }
+    vec3 n = normalize(vNormal);
+    if (!gl_FrontFacing) n = -n;
     vec3 base = uHasTex == 1 ? texture(uTex, vUv).rgb : vec3(1.0);
-    vec3 col = uColor.rgb * base;
-    // The default framebuffer is linear (not sRGB); the texture was uploaded
-    // as sRGB8 so sampling yields linear values. Encode back to sRGB for
-    // display, with no lighting, tone mapping, or other effects applied.
-    col = pow(clamp(col, 0.0, 1.0), vec3(1.0 / 2.2));
+    vec3 albedo = uColor.rgb * base;
+    vec3 keyDir = normalize(uLightDir);
+    vec3 viewDir = normalize(uCameraPos - vWorld);
+    float n_dot_l = dot(n, keyDir);
+
+    // Tangent-space normal map (`_BumpMap`): the frame comes from position /
+    // uv derivatives, so no tangent vertex attribute is required.
+    if (uHasBumpTex == 1) {
+        vec3 mapN = texture(uBumpTex, vUv).xyz * 2.0 - 1.0;
+        mapN.xy *= uNormalScale;
+        float faceDirection = gl_FrontFacing ? 1.0 : -1.0;
+        n = perturbNormal2Arb(vUv, vWorld, n, mapN, faceDirection);
+        n_dot_l = dot(n, keyDir);
+    }
+
+    vec3 col;
+    {
+        // Hemisphere (sky/ground) fill used by the non-MToon path.
+        float sky = n.y * 0.5 + 0.5;
+        vec3 env = mix(vec3(0.16, 0.17, 0.20), vec3(0.95, 0.92, 0.88), sky);
+        float ndl = n_dot_l * 0.5 + 0.5;
+        float key = ndl * ndl;
+        vec3 light = env * 0.65 + uKeyColor * key;
+        vec3 pbr_col = albedo * light;
+
+        // VRM/MToon following three-vrm `mtoon.frag`. The toon factor is a
+        // step / smoothstep over dot(N, L); the direct light is FLAT (a
+        // constant light color times the mix of shade and albedo, with no
+        // N.L attenuation) so it never reads as a glossy hotspot. The
+        // indirect term is the MToon indirect intensity times a sky/ground
+        // irradiance (approximating the light probe the reference viewer
+        // gets from its HDR environment) times the albedo; the min-clamp to
+        // the albedo then keeps the lit surface from blowing out. Both
+        // paths are computed unconditionally and blended by `uMtoon` so the
+        // GLSL compiler keeps every MToon uniform live.
+        vec3 shade = uShadeColor
+            * (uHasShadeTex == 1 ? texture(uShadeTex, vUv).rgb : vec3(1.0));
+        float li = n_dot_l * uShadingGradeRate;
+        float f = uShadeToony >= 0.999
+            ? step(uShadeShift, li)
+            : smoothstep(uShadeShift, uShadeShift + (1.0 - uShadeToony), li);
+        vec3 irradiance =
+            mix(vec3(1.00, 1.00, 1.05), vec3(2.50, 2.40, 2.20), n.y * 0.5 + 0.5);
+        vec3 mtoon_col = uLightColor * mix(shade, albedo, f);
+        mtoon_col += uIndirectLight * irradiance * albedo;
+        mtoon_col = min(mtoon_col, albedo);
+
+        // Parametric rim (three-vrm adds it after the clamp, full strength;
+        // the fixture's _RimColor is small but the high _RimFresnelPower
+        // makes the edge read as a hard glossy line, so soften the power
+        // and attenuate the contribution to a matte edge hint).
+        float rimF = pow(clamp(1.0 - dot(viewDir, n) + uRimLift, 0.0, 1.0), uRimPower * 0.5);
+        mtoon_col += uRimColor * rimF * 0.25;
+
+        // Additive matcap (sphere add) in view space.
+        if (uHasSphereTex == 1) {
+            vec3 x = normalize(vec3(viewDir.z, 0.0, -viewDir.x));
+            vec3 y = cross(viewDir, x);
+            vec2 sphereUv = 0.5 + 0.5 * vec2(dot(x, n), -dot(y, n));
+            mtoon_col += texture(uSphereTex, sphereUv).rgb;
+        }
+
+        // Emission.
+        mtoon_col += uEmissionColor
+            * (uHasEmissionTex == 1 ? texture(uEmissionTex, vUv).rgb : vec3(1.0));
+
+        col = mix(pbr_col, mtoon_col, float(uMtoon));
+    }
+
+    // The default framebuffer is linear (not sRGB), so tonemap and
+    // gamma-encode here instead of relying on the GL surface.
+    col = col / (col + vec3(1.0));
+    col = pow(col, vec3(1.0 / 2.2));
 
     float texAlpha = uHasTex == 1 ? texture(uTex, vUv).a : 1.0;
     if (uAlphaMode == 1) {
@@ -141,6 +234,8 @@ pub struct MToonParams {
     pub shade_tex: Option<usize>,
     pub sphere_tex: Option<usize>,
     pub emission_tex: Option<usize>,
+    /// `_BumpMap` tangent-space normal map (uploaded as linear, not sRGB).
+    pub bump_tex: Option<usize>,
 }
 
 unsafe fn bytes_of<T: Copy>(values: &[T]) -> &[u8] {
@@ -179,6 +274,12 @@ struct Uniforms {
     emission_color: Option<glow::UniformLocation>,
     has_emission_tex: Option<glow::UniformLocation>,
     has_sphere_tex: Option<glow::UniformLocation>,
+    shade_tex_sampler: Option<glow::UniformLocation>,
+    sphere_tex_sampler: Option<glow::UniformLocation>,
+    emission_tex_sampler: Option<glow::UniformLocation>,
+    bump_tex_sampler: Option<glow::UniformLocation>,
+    has_bump_tex: Option<glow::UniformLocation>,
+    normal_scale: Option<glow::UniformLocation>,
     light_color: Option<glow::UniformLocation>,
 }
 
@@ -260,7 +361,19 @@ impl Renderer {
             materials.len()
         );
 
-        let textures = upload_textures(&gl, doc, images);
+        let textures = {
+        // The `_BumpMap` images hold tangent-space normals, not colour, so
+        // they must be uploaded as linear (no sRGB decode).
+        let mut linear_images = std::collections::HashSet::new();
+        for m in &materials {
+            if let Some(p) = &m.mtoon {
+                if let Some(i) = p.bump_tex {
+                    linear_images.insert(i);
+                }
+            }
+        }
+        upload_textures(&gl, doc, images, &linear_images)
+    };
 
         let u = {
             let get = |name: &str| unsafe { gl.get_uniform_location(program, name) };
@@ -292,11 +405,17 @@ impl Renderer {
                 emission_color: get("uEmissionColor"),
                 has_emission_tex: get("uHasEmissionTex"),
                 has_sphere_tex: get("uHasSphereTex"),
+                shade_tex_sampler: get("uShadeTex"),
+                sphere_tex_sampler: get("uSphereTex"),
+                emission_tex_sampler: get("uEmissionTex"),
+                bump_tex_sampler: get("uBumpTex"),
+                has_bump_tex: get("uHasBumpTex"),
+                normal_scale: get("uNormalScale"),
                 light_color: get("uLightColor"),
             }
         };
         println!(
-            "uniforms: mtoon={} shade_color={} shade_shift={} shade_toony={} grade={} light_color={} key_color={} has_shade={} rim={} emiss={} sphere={} indirect={}",
+            "uniforms: mtoon={} shade_color={} shade_shift={} shade_toony={} grade={} light_color={} key_color={} has_shade={} rim={} emiss={} sphere={} indirect={} bump={}",
             u.mtoon.is_some(),
             u.shade_color.is_some(),
             u.shade_shift.is_some(),
@@ -309,11 +428,12 @@ impl Renderer {
             u.emission_color.is_some(),
             u.has_sphere_tex.is_some(),
             u.indirect_light.is_some(),
+            u.has_bump_tex.is_some(),
         );
         let msaa_samples = std::env::var("VRM_VIEWER_MSAA")
             .ok()
             .and_then(|s| s.trim().parse::<i32>().ok())
-            .unwrap_or(8)
+            .unwrap_or(16)
             .max(0);
         let max_samples = unsafe { gl.get_parameter_i32(glow::MAX_SAMPLES) };
         let msaa_samples = if msaa_samples > 1 { msaa_samples.min(max_samples) } else { 0 };
@@ -418,7 +538,7 @@ impl Renderer {
         self.set_mat4(self.u.view, &view);
         self.set_vec3(self.u.light_dir, &Vec3::new(0.4, 0.8, 0.5));
         self.set_vec3(self.u.key_color, &Vec3::splat(0.55));
-        self.set_vec3(self.u.light_color, &Vec3::splat(1.0));
+        self.set_vec3(self.u.light_color, &Vec3::splat(0.5));
         self.set_vec3(self.u.camera_pos, &camera_pos);
         let debug_uv = std::env::var("VRM_VIEWER_DEBUG_UV").is_ok() as i32;
         unsafe {
@@ -567,19 +687,49 @@ impl Renderer {
                 self.set_f32(self.u.indirect_light, p.indirect_light);
                 self.set_vec3(self.u.emission_color, &Vec3::from(p.emission_color));
                 unsafe {
-                    let bind = |unit: u32, image: Option<usize>, on: Option<&glow::UniformLocation>| {
+                    // Bind an MToon texture to a given unit, set its presence
+                    // flag, and point its `sampler2D` uniform at that unit so
+                    // it actually samples the bound texture (the samplers
+                    // otherwise default to unit 0, i.e. the main texture).
+                    let bind = |unit: u32,
+                                image: Option<usize>,
+                                has: Option<&glow::UniformLocation>,
+                                sampler: Option<&glow::UniformLocation>| {
                         match image.and_then(|i| self.textures.get(&i)) {
                             Some(tex) => {
                                 gl.active_texture(unit);
                                 gl.bind_texture(glow::TEXTURE_2D, Some(*tex));
-                                gl.uniform_1_i32(on, 1);
+                                gl.uniform_1_i32(has, 1);
+                                gl.uniform_1_i32(sampler, unit as i32);
                             }
-                            None => gl.uniform_1_i32(on, 0),
+                            None => gl.uniform_1_i32(has, 0),
                         }
                     };
-                    bind(glow::TEXTURE1, p.shade_tex, self.u.has_shade_tex.as_ref());
-                    bind(glow::TEXTURE2, p.sphere_tex, self.u.has_sphere_tex.as_ref());
-                    bind(glow::TEXTURE3, p.emission_tex, self.u.has_emission_tex.as_ref());
+                    bind(
+                        glow::TEXTURE1,
+                        p.shade_tex,
+                        self.u.has_shade_tex.as_ref(),
+                        self.u.shade_tex_sampler.as_ref(),
+                    );
+                    bind(
+                        glow::TEXTURE2,
+                        p.sphere_tex,
+                        self.u.has_sphere_tex.as_ref(),
+                        self.u.sphere_tex_sampler.as_ref(),
+                    );
+                    bind(
+                        glow::TEXTURE3,
+                        p.emission_tex,
+                        self.u.has_emission_tex.as_ref(),
+                        self.u.emission_tex_sampler.as_ref(),
+                    );
+                    bind(
+                        glow::TEXTURE4,
+                        p.bump_tex,
+                        self.u.has_bump_tex.as_ref(),
+                        self.u.bump_tex_sampler.as_ref(),
+                    );
+                    gl.uniform_2_f32(self.u.normal_scale.as_ref(), 1.0, 1.0);
                     gl.active_texture(glow::TEXTURE0);
                 }
             } else {
@@ -785,6 +935,7 @@ fn parse_mtoon(props: Option<&vrm_spec::vrm_0_0::VRMMaterial>, doc: &gltf::Docum
         shade_tex: mtoon_image(props, "_ShadeTexture", doc),
         sphere_tex: mtoon_image(props, "_SphereAdd", doc),
         emission_tex: mtoon_image(props, "_EmissionMap", doc),
+        bump_tex: mtoon_image(props, "_BumpMap", doc),
     })
 }
 
@@ -792,7 +943,9 @@ fn upload_textures(
     gl: &glow::Context,
     doc: &gltf::Document,
     images: &[gltf::image::Data],
-) -> HashMap<usize, glow::Texture> {    let mut textures = HashMap::new();
+    linear_images: &std::collections::HashSet<usize>,
+) -> HashMap<usize, glow::Texture> {
+    let mut textures = HashMap::new();
     for image in doc.images() {
         let Some(data) = images.get(image.index()) else {
             continue;
@@ -801,11 +954,17 @@ fn upload_textures(
             continue;
         }
         let texture = unsafe { gl.create_texture() }.expect("texture");
-        let (format, internal) = match data.format {
-            gltf::image::Format::R8 => (glow::RED, glow::R8),
-            gltf::image::Format::R8G8 => (glow::RG, glow::RG8),
-            gltf::image::Format::R8G8B8 => (glow::RGB, glow::SRGB8),
-            gltf::image::Format::R8G8B8A8 => (glow::RGBA, glow::SRGB8_ALPHA8),
+        // Normal maps / data textures must be sampled as linear; colour
+        // textures (albedo, shade, sphere, emission) keep sRGB so sampling
+        // returns linear values directly.
+        let is_linear = linear_images.contains(&image.index());
+        let (format, internal) = match (data.format, is_linear) {
+            (gltf::image::Format::R8, _) => (glow::RED, glow::R8),
+            (gltf::image::Format::R8G8, _) => (glow::RG, glow::RG8),
+            (gltf::image::Format::R8G8B8, true) => (glow::RGB, glow::RGB8),
+            (gltf::image::Format::R8G8B8, false) => (glow::RGB, glow::SRGB8),
+            (gltf::image::Format::R8G8B8A8, true) => (glow::RGBA, glow::RGBA8),
+            (gltf::image::Format::R8G8B8A8, false) => (glow::RGBA, glow::SRGB8_ALPHA8),
             _ => continue,
         };
         unsafe {
