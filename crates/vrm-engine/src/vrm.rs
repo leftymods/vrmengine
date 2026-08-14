@@ -10,6 +10,7 @@ use crate::humanoid::Humanoid;
 use crate::look_at::{LookAtController, LookAtMode};
 use crate::spring_bone::SpringBoneController;
 use crate::transform::Transform;
+use vrm_spec::vrm_0_0::VRMMaterial;
 
 /// VRM specification version of a loaded model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,6 +71,10 @@ pub struct Vrm {
     pub look_at: Option<LookAtController>,
     pub spring_bones: SpringBoneController,
     pub first_person: FirstPerson,
+
+    /// VRM 0.0 material properties (`extensions.VRM.materialProperties`),
+    /// aligned with `doc.materials()` by index. Empty for VRM 1.0 models.
+    pub material_properties: Vec<VRMMaterial>,
 
     pub(crate) node_morph_count: Vec<usize>,
     pub(crate) morph_weights: Vec<Vec<f32>>,

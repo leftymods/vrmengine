@@ -56,10 +56,29 @@ uniform vec4 uColor;
 uniform sampler2D uTex;
 uniform int uHasTex;
 uniform vec3 uLightDir;
+uniform vec3 uKeyColor;
 uniform vec3 uCameraPos;
 uniform int uDebugUv;
 uniform int uAlphaMode;
 uniform float uAlphaCutoff;
+
+uniform int uMtoon;
+uniform vec3 uShadeColor;
+uniform int uHasShadeTex;
+uniform sampler2D uShadeTex;
+uniform float uShadeShift;
+uniform float uShadeToony;
+uniform float uShadingGradeRate;
+uniform vec3 uRimColor;
+uniform float uRimPower;
+uniform float uRimLift;
+uniform float uRimMix;
+uniform float uIndirectLight;
+uniform vec3 uEmissionColor;
+uniform int uHasEmissionTex;
+uniform sampler2D uEmissionTex;
+uniform int uHasSphereTex;
+uniform sampler2D uSphereTex;
 
 out vec4 fragColor;
 
@@ -72,23 +91,60 @@ void main() {
     if (!gl_FrontFacing) n = -n;
     vec3 base = uHasTex == 1 ? texture(uTex, vUv).rgb : vec3(1.0);
     vec3 albedo = uColor.rgb * base;
-
-    // Global (hemisphere) light: a warm sky gradient blended against a cool
-    // ground bounce by the normal direction, so every surface picks up light
-    // from the whole environment instead of a single glossy direction.
-    float sky = n.y * 0.5 + 0.5;
-    vec3 ground = vec3(0.16, 0.17, 0.20);
-    vec3 zenith = vec3(0.95, 0.92, 0.88);
-    vec3 env = mix(ground, zenith, sky);
-
-    // Soft key light from above-front with a wrapped, squared falloff so the
-    // transition is gradual and nothing develops a hard highlight.
     vec3 keyDir = normalize(uLightDir);
-    float ndl = dot(n, keyDir) * 0.5 + 0.5;
-    float key = ndl * ndl;
-    vec3 light = env * 0.65 + vec3(0.55) * key;
+    vec3 viewDir = normalize(uCameraPos - vWorld);
+    float n_dot_l = dot(n, keyDir);
 
-    vec3 col = albedo * light;
+    vec3 col;
+    if (uMtoon == 1) {
+        // VRM/MToon shading following bevy_shader_mtoon (unavi-xyz/bevy_vrm),
+        // the Rust port of the shader. VRM 0.0 `_ShadeShift` is negated and the
+        // toon factor is a linear_step over [-1+toony, 1-toony] of
+        // `dot(N, L) - _ShadeShift`; the diffuse lerps between the shade
+        // texture and the main texture. The result is lit with the same matte
+        // scene light as the PBR path and clamped to the albedo, so MToon
+        // shade regions appear without any specular gloss.
+        vec3 shade = uShadeColor
+            * (uHasShadeTex == 1 ? texture(uShadeTex, vUv).rgb : vec3(1.0));
+        float shading = n_dot_l + (-uShadeShift);
+        float ramp_a = -1.0 + uShadeToony;
+        float ramp_b = 1.0 - uShadeToony;
+        float f = ramp_b > ramp_a
+            ? clamp((shading - ramp_a) / (ramp_b - ramp_a), 0.0, 1.0)
+            : (shading > 0.0 ? 1.0 : 0.0);
+        vec3 env = mix(vec3(0.16, 0.17, 0.20), vec3(0.95, 0.92, 0.88), n.y * 0.5 + 0.5);
+        float ndl = n_dot_l * 0.5 + 0.5;
+        float key = ndl * ndl;
+        vec3 light = env * 0.65 + uKeyColor * key;
+        col = mix(shade, albedo, f) * light;
+        col = min(col, albedo);
+
+        // Parametric rim light. Kept at a quarter strength so the edge never
+        // reads as a glossy specular sheen.
+        float rimF = pow(clamp(1.0 - dot(viewDir, n) + uRimLift, 0.0, 1.0), uRimPower);
+        col += uRimColor * rimF * 0.25 * mix(vec3(1.0), light, uRimMix);
+
+        // Additive matcap (sphere add) in view space.
+        if (uHasSphereTex == 1) {
+            vec3 x = normalize(vec3(viewDir.z, 0.0, -viewDir.x));
+            vec3 y = cross(viewDir, x);
+            vec2 sphereUv = 0.5 + 0.5 * vec2(dot(x, n), -dot(y, n));
+            col += texture(uSphereTex, sphereUv).rgb;
+        }
+
+        // Emission.
+        col += uEmissionColor
+            * (uHasEmissionTex == 1 ? texture(uEmissionTex, vUv).rgb : vec3(1.0));
+    } else {
+        // Global (hemisphere) light: a warm sky gradient blended against a
+        // cool ground bounce by the normal direction, plus a soft wrapped key.
+        float sky = n.y * 0.5 + 0.5;
+        vec3 env = mix(vec3(0.16, 0.17, 0.20), vec3(0.95, 0.92, 0.88), sky);
+        float ndl = n_dot_l * 0.5 + 0.5;
+        float key = ndl * ndl;
+        vec3 light = env * 0.65 + uKeyColor * key;
+        col = albedo * light;
+    }
 
     // The default framebuffer is linear (not sRGB), so tonemap and
     // gamma-encode here instead of relying on the GL surface.
@@ -116,6 +172,29 @@ pub struct MaterialInfo {
     /// 0 = Opaque, 1 = Mask, 2 = Blend (from `alphaMode`).
     pub alpha_mode: u8,
     pub alpha_cutoff: f32,
+    /// MToon shading parameters when the material is a `VRM/MToon` shader.
+    pub mtoon: Option<MToonParams>,
+}
+
+/// Parameters of the `VRM/MToon` shader (VRM 0.x), mirroring the properties in
+/// `extensions.VRM.materialProperties`. See three-vrm's `mtoon.frag` for the
+/// reference implementation.
+#[derive(Clone, Copy)]
+pub struct MToonParams {
+    pub shade_color: [f32; 3],
+    pub shade_shift: f32,
+    pub shade_toony: f32,
+    pub shading_grade_rate: f32,
+    pub rim_color: [f32; 3],
+    pub rim_power: f32,
+    pub rim_lift: f32,
+    pub rim_mix: f32,
+    pub indirect_light: f32,
+    pub emission_color: [f32; 3],
+    /// Image indices into the glTF images (texture -> source image resolved).
+    pub shade_tex: Option<usize>,
+    pub sphere_tex: Option<usize>,
+    pub emission_tex: Option<usize>,
 }
 
 unsafe fn bytes_of<T: Copy>(values: &[T]) -> &[u8] {
@@ -135,10 +214,25 @@ struct Uniforms {
     color: Option<glow::UniformLocation>,
     has_tex: Option<glow::UniformLocation>,
     light_dir: Option<glow::UniformLocation>,
+    key_color: Option<glow::UniformLocation>,
     camera_pos: Option<glow::UniformLocation>,
     debug_uv: Option<glow::UniformLocation>,
     alpha_mode: Option<glow::UniformLocation>,
     alpha_cutoff: Option<glow::UniformLocation>,
+    mtoon: Option<glow::UniformLocation>,
+    shade_color: Option<glow::UniformLocation>,
+    has_shade_tex: Option<glow::UniformLocation>,
+    shade_shift: Option<glow::UniformLocation>,
+    shade_toony: Option<glow::UniformLocation>,
+    shading_grade_rate: Option<glow::UniformLocation>,
+    rim_color: Option<glow::UniformLocation>,
+    rim_power: Option<glow::UniformLocation>,
+    rim_lift: Option<glow::UniformLocation>,
+    rim_mix: Option<glow::UniformLocation>,
+    indirect_light: Option<glow::UniformLocation>,
+    emission_color: Option<glow::UniformLocation>,
+    has_emission_tex: Option<glow::UniformLocation>,
+    has_sphere_tex: Option<glow::UniformLocation>,
 }
 
 pub struct Renderer {
@@ -166,6 +260,7 @@ impl Renderer {
         gl: Arc<glow::Context>,
         doc: &gltf::Document,
         images: &[gltf::image::Data],
+        material_properties: &[vrm_spec::vrm_0_0::VRMMaterial],
     ) -> Self {
         let program = unsafe { compile_program(&gl, VERTEX_SHADER, FRAGMENT_SHADER) };
         let vao = unsafe { gl.create_vertex_array() }.expect("vao");
@@ -194,7 +289,8 @@ impl Renderer {
 
         let materials = doc
             .materials()
-            .map(|m| {
+            .enumerate()
+            .map(|(i, m)| {
                 let pbr = m.pbr_metallic_roughness();
                 MaterialInfo {
                     base_color: pbr.base_color_factor(),
@@ -207,6 +303,7 @@ impl Renderer {
                         gltf::material::AlphaMode::Blend => 2u8,
                     },
                     alpha_cutoff: m.alpha_cutoff().unwrap_or(0.5),
+                    mtoon: parse_mtoon(material_properties.get(i), doc),
                 }
             })
             .collect();
@@ -224,16 +321,31 @@ impl Renderer {
                 color: get("uColor"),
                 has_tex: get("uHasTex"),
                 light_dir: get("uLightDir"),
+                key_color: get("uKeyColor"),
                 camera_pos: get("uCameraPos"),
                 debug_uv: get("uDebugUv"),
                 alpha_mode: get("uAlphaMode"),
                 alpha_cutoff: get("uAlphaCutoff"),
+                mtoon: get("uMtoon"),
+                shade_color: get("uShadeColor"),
+                has_shade_tex: get("uHasShadeTex"),
+                shade_shift: get("uShadeShift"),
+                shade_toony: get("uShadeToony"),
+                shading_grade_rate: get("uShadingGradeRate"),
+                rim_color: get("uRimColor"),
+                rim_power: get("uRimPower"),
+                rim_lift: get("uRimLift"),
+                rim_mix: get("uRimMix"),
+                indirect_light: get("uIndirectLight"),
+                emission_color: get("uEmissionColor"),
+                has_emission_tex: get("uHasEmissionTex"),
+                has_sphere_tex: get("uHasSphereTex"),
             }
         };
         let msaa_samples = std::env::var("VRM_VIEWER_MSAA")
             .ok()
             .and_then(|s| s.trim().parse::<i32>().ok())
-            .unwrap_or(4)
+            .unwrap_or(8)
             .max(0);
         let max_samples = unsafe { gl.get_parameter_i32(glow::MAX_SAMPLES) };
         let msaa_samples = if msaa_samples > 1 { msaa_samples.min(max_samples) } else { 0 };
@@ -337,6 +449,7 @@ impl Renderer {
         self.set_mat4(self.u.proj, &proj);
         self.set_mat4(self.u.view, &view);
         self.set_vec3(self.u.light_dir, &Vec3::new(0.4, 0.8, 0.5));
+        self.set_vec3(self.u.key_color, &Vec3::splat(0.55));
         self.set_vec3(self.u.camera_pos, &camera_pos);
         let debug_uv = std::env::var("VRM_VIEWER_DEBUG_UV").is_ok() as i32;
         unsafe {
@@ -467,6 +580,41 @@ impl Renderer {
                 }
             } else {
                 self.set_i32(self.u.has_tex, 0);
+            }
+
+            // MToon shading parameters + extra samplers (shade / matcap /
+            // emission). All images are already uploaded in `textures`.
+            let mtoon = material.mtoon;
+            if let Some(p) = mtoon {
+                self.set_i32(self.u.mtoon, 1);
+                self.set_vec3(self.u.shade_color, &Vec3::from(p.shade_color));
+                self.set_f32(self.u.shade_shift, p.shade_shift);
+                self.set_f32(self.u.shade_toony, p.shade_toony);
+                self.set_f32(self.u.shading_grade_rate, p.shading_grade_rate);
+                self.set_vec3(self.u.rim_color, &Vec3::from(p.rim_color));
+                self.set_f32(self.u.rim_power, p.rim_power);
+                self.set_f32(self.u.rim_lift, p.rim_lift);
+                self.set_f32(self.u.rim_mix, p.rim_mix);
+                self.set_f32(self.u.indirect_light, p.indirect_light);
+                self.set_vec3(self.u.emission_color, &Vec3::from(p.emission_color));
+                unsafe {
+                    let bind = |unit: u32, image: Option<usize>, on: Option<&glow::UniformLocation>| {
+                        match image.and_then(|i| self.textures.get(&i)) {
+                            Some(tex) => {
+                                gl.active_texture(unit);
+                                gl.bind_texture(glow::TEXTURE_2D, Some(*tex));
+                                gl.uniform_1_i32(on, 1);
+                            }
+                            None => gl.uniform_1_i32(on, 0),
+                        }
+                    };
+                    bind(glow::TEXTURE1, p.shade_tex, self.u.has_shade_tex.as_ref());
+                    bind(glow::TEXTURE2, p.sphere_tex, self.u.has_sphere_tex.as_ref());
+                    bind(glow::TEXTURE3, p.emission_tex, self.u.has_emission_tex.as_ref());
+                    gl.active_texture(glow::TEXTURE0);
+                }
+            } else {
+                self.set_i32(self.u.mtoon, 0);
             }
 
             // Draw both windings (VRoid exports mixed winding): pass 1 draws
@@ -622,12 +770,60 @@ unsafe fn compile_program(gl: &glow::Context, vs: &str, fs: &str) -> glow::Progr
     program
 }
 
+/// Resolve a `_MainTex`-style texture property (a glTF texture index) to its
+/// source image index, so it can be looked up in the uploaded texture map.
+fn mtoon_image(
+    props: &vrm_spec::vrm_0_0::VRMMaterial,
+    name: &str,
+    doc: &gltf::Document,
+) -> Option<usize> {
+    let idx = props
+        .texture_properties
+        .as_ref()
+        .and_then(|m| m.get(name))
+        .copied()?;
+    let tex: usize = idx.value();
+    doc.textures().nth(tex).map(|t| t.source().index())
+}
+
+/// Extract `VRM/MToon` shading parameters from a VRM 0.0 material property.
+/// Returns `None` for non-MToon materials so the PBR path stays untouched.
+fn parse_mtoon(props: Option<&vrm_spec::vrm_0_0::VRMMaterial>, doc: &gltf::Document) -> Option<MToonParams> {
+    let props = props?;
+    if props.shader.as_deref() != Some("VRM/MToon") {
+        return None;
+    }
+    let f = |name: &str| props.float_properties.as_ref().and_then(|m| m.get(name)).copied();
+    let v = |name: &str| {
+        props
+            .vector_properties
+            .as_ref()
+            .and_then(|m| m.get(name))
+            .map(|x| [x.first().copied().unwrap_or(0.0), x.get(1).copied().unwrap_or(0.0), x.get(2).copied().unwrap_or(0.0)])
+    };
+    let to3 = |c: Option<[f64; 3]>| c.map(|c| [c[0] as f32, c[1] as f32, c[2] as f32]);
+    Some(MToonParams {
+        shade_color: to3(v("_ShadeColor")).unwrap_or([1.0, 1.0, 1.0]),
+        shade_shift: f("_ShadeShift").unwrap_or(0.0) as f32,
+        shade_toony: f("_ShadeToony").unwrap_or(0.9) as f32,
+        shading_grade_rate: f("_ShadingGradeRate").unwrap_or(1.0) as f32,
+        rim_color: to3(v("_RimColor")).unwrap_or([0.0, 0.0, 0.0]),
+        rim_power: f("_RimFresnelPower").unwrap_or(1.0) as f32,
+        rim_lift: f("_RimLift").unwrap_or(0.0) as f32,
+        rim_mix: f("_RimLightingMix").unwrap_or(0.0) as f32,
+        indirect_light: f("_IndirectLightIntensity").unwrap_or(0.1) as f32,
+        emission_color: to3(v("_EmissionColor")).unwrap_or([0.0, 0.0, 0.0]),
+        shade_tex: mtoon_image(props, "_ShadeTexture", doc),
+        sphere_tex: mtoon_image(props, "_SphereAdd", doc),
+        emission_tex: mtoon_image(props, "_EmissionMap", doc),
+    })
+}
+
 fn upload_textures(
     gl: &glow::Context,
     doc: &gltf::Document,
     images: &[gltf::image::Data],
-) -> HashMap<usize, glow::Texture> {
-    let mut textures = HashMap::new();
+) -> HashMap<usize, glow::Texture> {    let mut textures = HashMap::new();
     for image in doc.images() {
         let Some(data) = images.get(image.index()) else {
             continue;

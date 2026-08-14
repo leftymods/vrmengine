@@ -2450,6 +2450,7 @@ dependencies = [
  "gltf",
  "glutin",
  "vrm-engine",
+ "vrm-spec",
  "winit",
 ]
 

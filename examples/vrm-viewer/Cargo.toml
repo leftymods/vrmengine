@@ -6,6 +6,7 @@ publish = false
 
 [dependencies]
 vrm-engine = { path = "../../crates/vrm-engine" }
+vrm-spec = { workspace = true }
 glam = { workspace = true }
 gltf = { workspace = true }
 glow = "0.17"

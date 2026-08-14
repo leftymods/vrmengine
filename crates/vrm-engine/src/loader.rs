@@ -102,6 +102,7 @@ fn build(doc: gltf::Document) -> Result<Vrm, VrmError> {
         look_at: None,
         spring_bones: SpringBoneController::default(),
         first_person: FirstPerson::empty(node_count, mesh_count),
+        material_properties: Vec::new(),
         node_morph_count,
         morph_weights: Vec::new(),
         order,
@@ -139,6 +140,7 @@ fn build(doc: gltf::Document) -> Result<Vrm, VrmError> {
             vrm.look_at = load_look_at_vrm0(&schema, &vrm.humanoid);
             vrm.first_person = load_first_person_vrm0(&schema, node_count, mesh_count);
             vrm.spring_bones = load_spring_bones_vrm0(&vrm.doc, &vrm.nodes);
+            vrm.material_properties = schema.material_properties.unwrap_or_default();
         }
     }
 

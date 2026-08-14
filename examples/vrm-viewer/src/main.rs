@@ -121,7 +121,7 @@ impl Viewer {
         let mut camera = Camera::default();
         camera.frame(view_model.aabb_min, view_model.aabb_max);
 
-        let renderer = Renderer::new(std::sync::Arc::new(gl), &model.vrm.doc, &model.images);
+        let renderer = Renderer::new(std::sync::Arc::new(gl), &model.vrm.doc, &model.images, &model.vrm.material_properties);
         window.set_title(&format!(
             "vrm-viewer - {}",
             model_path(&model)
@@ -337,7 +337,7 @@ fn headless_render(path: &str, out_ppm: &str) {
             gl_display.get_proc_address(&c)
         })
     };
-    let mut renderer = Renderer::new(std::sync::Arc::new(gl), &model.vrm.doc, &model.images);
+    let mut renderer = Renderer::new(std::sync::Arc::new(gl), &model.vrm.doc, &model.images, &model.vrm.material_properties);
     let mut view_model = model::extract(&model);
     let mut camera = Camera::default();
     camera.frame(view_model.aabb_min, view_model.aabb_max);
