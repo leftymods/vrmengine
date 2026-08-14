@@ -10,6 +10,8 @@
 //! - `1`..`=` : set a facial expression (happy, angry, sad, surprised,
 //!   relaxed, blink, neutral, aa, ih, ou, oh, ee)
 //! - `r`      : reset pose and expressions
+//! - drop a `.vrm`/`.glb` file on the window (or type a path in the
+//!   "Load model" panel) to switch models
 //! - `Esc`    : quit
 
 mod camera;
@@ -57,10 +59,13 @@ struct Viewer {
     egui_ctx: egui::Context,
     egui_state: egui_winit::State,
     egui_painter: egui_glow::Painter,
+    build_label: String,
+    path_input: String,
+    status: Option<String>,
 }
 
 impl Viewer {
-    fn new(event_loop: &ActiveEventLoop, model: LoadedModel) -> Self {
+    fn new(event_loop: &ActiveEventLoop, model: LoadedModel, path: String) -> Self {
         let window = event_loop
             .create_window(
                 Window::default_attributes()
@@ -157,7 +162,39 @@ impl Viewer {
             egui_ctx,
             egui_state,
             egui_painter,
+            build_label: build_label(),
+            path_input: path,
+            status: None,
         }
+    }
+
+    /// Replace the loaded model with the one at `path` (a .vrm/.glb file).
+    fn load_model(&mut self, path: &str) -> Result<(), String> {
+        let model = vrm_engine::load_glb_from_path(path)
+            .map_err(|e| format!("failed to load {path}: {e}"))?;
+        let view_model = model::extract(&model);
+        let mut camera = Camera::default();
+        camera.frame(view_model.aabb_min, view_model.aabb_max);
+        let renderer = Renderer::new(
+            self.renderer.gl_arc(),
+            &model.vrm.doc,
+            &model.images,
+            &model.vrm.material_properties,
+        );
+        self.model = model;
+        self.view_model = view_model;
+        self.camera = camera;
+        self.renderer = renderer;
+        self.window.set_title(&format!("vrm-viewer - {}", model_path(&self.model)));
+        println!(
+            "loaded {} (VRM {}): {} nodes, {} meshes, {} spring groups",
+            model_path(&self.model),
+            self.model.vrm.version,
+            self.model.vrm.node_count(),
+            self.model.vrm.doc.meshes().len(),
+            self.model.vrm.spring_bones.groups.len(),
+        );
+        Ok(())
     }
 
     fn render_frame(&mut self) {
@@ -206,6 +243,7 @@ impl Viewer {
         let raw_input = self.egui_state.take_egui_input(&self.window);
         let mut changes: Vec<(ExpressionId, f32)> = Vec::new();
         let mut reset = false;
+        let mut pending_load: Option<String> = None;
 
         let mut full_output = self.egui_ctx.run_ui(raw_input, |ui| {
             egui::Window::new("Expressions")
@@ -228,6 +266,41 @@ impl Viewer {
                     ui.label("LMB orbit · RMB pan · wheel zoom");
                     ui.label("1-0/-= expressions · r reset · Esc quit");
                 });
+
+            // Load-model panel: type a path or drop a .vrm/.glb file anywhere
+            // on the window.
+            egui::Window::new("Load model")
+                .default_pos([8.0, 300.0])
+                .show(ui.ctx(), |ui| {
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.path_input)
+                                .desired_width(300.0)
+                                .hint_text("path/to/model.vrm"),
+                        );
+                        if ui.button("Load").clicked() {
+                            pending_load = Some(self.path_input.trim().to_string());
+                        }
+                    });
+                    if let Some(status) = &self.status {
+                        ui.label(egui::RichText::new(status).small());
+                    } else {
+                        ui.label("or drag & drop a .vrm/.glb file onto the window");
+                    }
+                });
+
+            // Build label in the bottom-right corner so the user can verify
+            // which build is running.
+            egui::Area::new(egui::Id::new("build-label"))
+                .anchor(egui::Align2::RIGHT_BOTTOM, [-8.0, -6.0])
+                .order(egui::Order::Foreground)
+                .show(ui.ctx(), |ui| {
+                    ui.label(
+                        egui::RichText::new(&self.build_label)
+                            .size(13.0)
+                            .color(egui::Color32::from_rgba_unmultiplied(220, 220, 220, 190)),
+                    );
+                });
         });
 
         self.egui_state
@@ -243,7 +316,12 @@ impl Viewer {
             &mut full_output.textures_delta,
         );
 
-        if reset {
+        if let Some(path) = pending_load {
+            self.status = Some(match self.load_model(&path) {
+                Ok(()) => format!("loaded {path}"),
+                Err(e) => e,
+            });
+        } else if reset {
             self.model.vrm.reset_expressions();
         } else {
             for (id, weight) in changes {
@@ -261,6 +339,42 @@ fn model_path(model: &LoadedModel) -> String {
         .name
         .clone()
         .unwrap_or_else(|| format!("vrm {}", model.vrm.version))
+}
+
+/// Build label shown in the bottom-right corner: git hash (baked at compile
+/// time) plus the real build time read from the executable's modification
+/// timestamp at startup, formatted in local time.
+fn build_label() -> String {
+    let hash = env!("VRM_VIEWER_BUILD_HASH");
+    let stamp = std::env::current_exe()
+        .ok()
+        .and_then(|p| std::fs::metadata(p).ok())
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| {
+            let secs = t
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .map(|d| d.as_secs() as i64)?;
+            Some(secs)
+        })
+        .map(localtime_format)
+        .unwrap_or_else(|| "unknown build time".to_string());
+    format!("vrm-viewer {hash} build {stamp}")
+}
+
+fn localtime_format(secs: i64) -> String {
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    let secs = secs as libc::time_t;
+    unsafe { libc::localtime_r(&secs, &mut tm) };
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+        tm.tm_year + 1900,
+        tm.tm_mon + 1,
+        tm.tm_mday,
+        tm.tm_hour,
+        tm.tm_min,
+        tm.tm_sec
+    )
 }
 
 /// Advance the simulation by `dt` seconds and draw a frame.
@@ -437,6 +551,7 @@ fn write_ppm(path: &str, width: u32, height: u32, rgba: &[u8]) {
 
 struct App {
     model: Option<LoadedModel>,
+    path: Option<String>,
     viewer: Option<Viewer>,
 }
 
@@ -444,7 +559,8 @@ impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.viewer.is_none() {
             let model = self.model.take().expect("model set before run");
-            self.viewer = Some(Viewer::new(event_loop, model));
+            let path = self.path.take().unwrap_or_default();
+            self.viewer = Some(Viewer::new(event_loop, model, path));
         }
     }
 
@@ -508,6 +624,14 @@ impl ApplicationHandler for App {
                         (viewer.camera.dist * (1.0 - p.y as f32 * 0.001)).clamp(0.2, 50.0);
                 }
             },
+            WindowEvent::DroppedFile(path) => {
+                let path = path.display().to_string();
+                viewer.path_input = path.clone();
+                viewer.status = Some(match viewer.load_model(&path) {
+                    Ok(()) => format!("loaded {path}"),
+                    Err(e) => e,
+                });
+            }
             // Keyboard shortcuts must always work: egui consumes keys whenever
             // a widget has keyboard focus (e.g. after clicking a slider), but
             // that must not disable `1`..`=`/`r`.
@@ -588,6 +712,7 @@ fn main() {
 
     let mut app = App {
         model: Some(model),
+        path: Some(path),
         viewer: None,
     };
     event_loop.run_app(&mut app).expect("run app");

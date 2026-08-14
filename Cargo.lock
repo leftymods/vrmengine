@@ -2449,6 +2449,7 @@ dependencies = [
  "glow",
  "gltf",
  "glutin",
+ "libc",
  "vrm-engine",
  "vrm-spec",
  "winit",
