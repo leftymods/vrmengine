@@ -52,6 +52,30 @@ pub fn load_from_path<P: AsRef<Path>>(path: P) -> Result<Vrm, VrmError> {
     load_from_bytes(&bytes)
 }
 
+/// A loaded VRM model together with the raw glTF buffers and decoded images.
+///
+/// The engine itself only needs the [`Vrm`], but a renderer needs the buffer
+/// data (vertices, indices, skin matrices) and decoded image pixels to draw
+/// the model.
+pub struct LoadedModel {
+    pub vrm: Vrm,
+    pub buffers: Vec<gltf::buffer::Data>,
+    pub images: Vec<gltf::image::Data>,
+}
+
+/// Load a VRM model together with its glTF buffers and images from raw bytes.
+pub fn load_glb_from_bytes(bytes: &[u8]) -> Result<LoadedModel, VrmError> {
+    let (doc, buffers, images) = gltf::import_slice(bytes).map_err(VrmError::Gltf)?;
+    let vrm = build(doc)?;
+    Ok(LoadedModel { vrm, buffers, images })
+}
+
+/// Load a VRM model together with its glTF buffers and images from a file.
+pub fn load_glb_from_path<P: AsRef<Path>>(path: P) -> Result<LoadedModel, VrmError> {
+    let bytes = std::fs::read(path).map_err(VrmError::Io)?;
+    load_glb_from_bytes(&bytes)
+}
+
 fn build(doc: gltf::Document) -> Result<Vrm, VrmError> {
     let node_count = doc.nodes().len();
     let mesh_count = doc.meshes().len();

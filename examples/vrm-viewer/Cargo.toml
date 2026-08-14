@@ -1,0 +1,13 @@
+[package]
+name = "vrm-viewer"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+vrm-engine = { path = "../../crates/vrm-engine" }
+glam = { workspace = true }
+gltf = { workspace = true }
+glow = "0.18"
+glutin = "0.32"
+winit = "0.30"

@@ -53,7 +53,10 @@ pub use bone::BoneName;
 pub use expression::{Expression, ExpressionId, ExpressionManager, ExpressionPreset};
 pub use first_person::{FirstPerson, FirstPersonCamera, FirstPersonFlag};
 pub use humanoid::Humanoid;
-pub use loader::{load_from_bytes, load_from_path, VrmError};
+pub use loader::{
+    load_from_bytes, load_from_path, load_glb_from_bytes, load_glb_from_path, LoadedModel,
+    VrmError,
+};
 pub use look_at::{LookAtController, LookAtMode, RangeMap};
 pub use meta::VrmMeta;
 pub use spring_bone::{Collider, SpringBoneController, SpringGroup, SpringParticle};
