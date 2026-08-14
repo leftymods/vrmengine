@@ -90,80 +90,12 @@ void main() {
         fragColor = vec4(vUv, 0.0, 1.0);
         return;
     }
-    vec3 n = normalize(vNormal);
-    if (!gl_FrontFacing) n = -n;
     vec3 base = uHasTex == 1 ? texture(uTex, vUv).rgb : vec3(1.0);
-    vec3 albedo = uColor.rgb * base;
-    vec3 keyDir = normalize(uLightDir);
-    vec3 viewDir = normalize(uCameraPos - vWorld);
-    float n_dot_l = dot(n, keyDir);
-
-    vec3 col;
-    {
-        // Global (hemisphere) light: a warm sky gradient blended against a
-        // cool ground bounce by the normal direction, plus a soft wrapped key.
-        // Used by the non-MToon path.
-        float sky = n.y * 0.5 + 0.5;
-        vec3 env = mix(vec3(0.16, 0.17, 0.20), vec3(0.95, 0.92, 0.88), sky);
-        float ndl = n_dot_l * 0.5 + 0.5;
-        float key = ndl * ndl;
-        vec3 light = env * 0.65 + uKeyColor * key;
-        vec3 pbr_col = albedo * light;
-
-        // VRM/MToon following three-vrm mtoon.frag (the reference VRM viewer):
-        // the toon factor is a step/smoothstep over dot(N, L) with `_ShadeShift`
-        // used directly (VRM 0.0 does not negate it), and the direct light is
-        // FLAT - mix(shade, albedo, f) times a constant light color, no N·L
-        // attenuation. That flatness is what makes MToon read as matte instead
-        // of glossy. Both paths are computed unconditionally and blended by
-        // uMtoon so the GLSL compiler cannot drop the MToon uniforms.
-        vec3 shade = uShadeColor
-            * (uHasShadeTex == 1 ? texture(uShadeTex, vUv).rgb : vec3(1.0));
-        float li = n_dot_l * uShadingGradeRate;
-        float f = uShadeToony >= 0.999
-            ? step(uShadeShift, li)
-            : smoothstep(uShadeShift, uShadeShift + (1.0 - uShadeToony), li);
-        // three-vrm mtoon.frag lighting. The direct light is FLAT (a constant
-        // light color times BRDF_Lambert = albedo/PI, no N.L attenuation), the
-        // indirect term is indirectLightIntensity * irradiance * albedo/PI,
-        // and the total is clamped to the albedo - exactly the reference VRM
-        // viewer. The flatness is what reads as matte cell shading instead of
-        // a glossy sheen.
-        vec3 irradiance =
-            mix(vec3(0.40, 0.42, 0.46), vec3(0.95, 0.92, 0.88), n.y * 0.5 + 0.5);
-        vec3 mtoon_col = uLightColor * mix(shade, albedo, f) / PI;
-        // The MToon indirect term normally comes from a scene-environment
-        // light probe; without one we approximate it with a sky/ground
-        // hemisphere, scaled up to the strength the reference viewer gets from
-        // its HDR cubemap so the model keeps matte form instead of reading as
-        // flat plastic.
-        mtoon_col += 0.45 * irradiance * albedo;
-        mtoon_col = min(mtoon_col, albedo);
-
-        // Parametric rim light (three-vrm adds it after the clamp, at full
-        // strength, without any attenuation).
-        float rimF = pow(clamp(1.0 - dot(viewDir, n) + uRimLift, 0.0, 1.0), uRimPower);
-        mtoon_col += uRimColor * rimF;
-
-        // Additive matcap (sphere add) in view space.
-        if (uHasSphereTex == 1) {
-            vec3 x = normalize(vec3(viewDir.z, 0.0, -viewDir.x));
-            vec3 y = cross(viewDir, x);
-            vec2 sphereUv = 0.5 + 0.5 * vec2(dot(x, n), -dot(y, n));
-            mtoon_col += texture(uSphereTex, sphereUv).rgb;
-        }
-
-        // Emission.
-        mtoon_col += uEmissionColor
-            * (uHasEmissionTex == 1 ? texture(uEmissionTex, vUv).rgb : vec3(1.0));
-
-        col = mix(pbr_col, mtoon_col, float(uMtoon));
-    }
-
-    // The default framebuffer is linear (not sRGB), so tonemap and
-    // gamma-encode here instead of relying on the GL surface.
-    col = col / (col + vec3(1.0));
-    col = pow(col, vec3(1.0 / 2.2));
+    vec3 col = uColor.rgb * base;
+    // The default framebuffer is linear (not sRGB); the texture was uploaded
+    // as sRGB8 so sampling yields linear values. Encode back to sRGB for
+    // display, with no lighting, tone mapping, or other effects applied.
+    col = pow(clamp(col, 0.0, 1.0), vec3(1.0 / 2.2));
 
     float texAlpha = uHasTex == 1 ? texture(uTex, vUv).a : 1.0;
     if (uAlphaMode == 1) {
