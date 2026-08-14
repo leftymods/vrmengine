@@ -52,13 +52,14 @@ in vec3 vNormal;
 in vec3 vWorld;
 in vec2 vUv;
 
+const float PI = 3.14159265358979323846;
+
 uniform vec4 uColor;
 uniform sampler2D uTex;
 uniform int uHasTex;
 uniform vec3 uLightDir;
 uniform vec3 uKeyColor;
 uniform vec3 uLightColor;
-uniform vec3 uAmbient;
 uniform vec3 uCameraPos;
 uniform int uDebugUv;
 uniform int uAlphaMode;
@@ -122,13 +123,22 @@ void main() {
         float f = uShadeToony >= 0.999
             ? step(uShadeShift, li)
             : smoothstep(uShadeShift, uShadeShift + (1.0 - uShadeToony), li);
-        vec3 mtoon_col = uLightColor * mix(shade, albedo, f) + uAmbient * albedo;
+        // three-vrm mtoon.frag lighting. The direct light is FLAT (a constant
+        // light color times BRDF_Lambert = albedo/PI, no N.L attenuation), the
+        // indirect term is indirectLightIntensity * irradiance * albedo/PI,
+        // and the total is clamped to the albedo - exactly the reference VRM
+        // viewer. The flatness is what reads as matte cell shading instead of
+        // a glossy sheen.
+        vec3 irradiance =
+            mix(vec3(0.16, 0.17, 0.20), vec3(0.95, 0.92, 0.88), n.y * 0.5 + 0.5);
+        vec3 mtoon_col = uLightColor * mix(shade, albedo, f) / PI;
+        mtoon_col += uIndirectLight * irradiance * albedo / PI;
         mtoon_col = min(mtoon_col, albedo);
 
-        // Parametric rim light. Kept at a quarter strength so the edge never
-        // reads as a glossy specular sheen.
+        // Parametric rim light (three-vrm adds it after the clamp, at full
+        // strength, without any attenuation).
         float rimF = pow(clamp(1.0 - dot(viewDir, n) + uRimLift, 0.0, 1.0), uRimPower);
-        mtoon_col += uRimColor * rimF * 0.25 * mix(vec3(1.0), uLightColor, uRimMix);
+        mtoon_col += uRimColor * rimF;
 
         // Additive matcap (sphere add) in view space.
         if (uHasSphereTex == 1) {
@@ -233,7 +243,6 @@ struct Uniforms {
     has_emission_tex: Option<glow::UniformLocation>,
     has_sphere_tex: Option<glow::UniformLocation>,
     light_color: Option<glow::UniformLocation>,
-    ambient: Option<glow::UniformLocation>,
 }
 
 pub struct Renderer {
@@ -347,23 +356,22 @@ impl Renderer {
                 has_emission_tex: get("uHasEmissionTex"),
                 has_sphere_tex: get("uHasSphereTex"),
                 light_color: get("uLightColor"),
-                ambient: get("uAmbient"),
             }
         };
         println!(
-            "uniforms: mtoon={} shade_color={} shade_shift={} shade_toony={} grade={} light_color={} ambient={} key_color={} has_shade={} rim={} emiss={} sphere={}",
+            "uniforms: mtoon={} shade_color={} shade_shift={} shade_toony={} grade={} light_color={} key_color={} has_shade={} rim={} emiss={} sphere={} indirect={}",
             u.mtoon.is_some(),
             u.shade_color.is_some(),
             u.shade_shift.is_some(),
             u.shade_toony.is_some(),
             u.shading_grade_rate.is_some(),
             u.light_color.is_some(),
-            u.ambient.is_some(),
             u.key_color.is_some(),
             u.has_shade_tex.is_some(),
             u.rim_color.is_some(),
             u.emission_color.is_some(),
             u.has_sphere_tex.is_some(),
+            u.indirect_light.is_some(),
         );
         let msaa_samples = std::env::var("VRM_VIEWER_MSAA")
             .ok()
@@ -473,8 +481,7 @@ impl Renderer {
         self.set_mat4(self.u.view, &view);
         self.set_vec3(self.u.light_dir, &Vec3::new(0.4, 0.8, 0.5));
         self.set_vec3(self.u.key_color, &Vec3::splat(0.55));
-        self.set_vec3(self.u.light_color, &Vec3::splat(0.9));
-        self.set_vec3(self.u.ambient, &Vec3::new(0.14, 0.15, 0.17));
+        self.set_vec3(self.u.light_color, &Vec3::splat(1.0));
         self.set_vec3(self.u.camera_pos, &camera_pos);
         let debug_uv = std::env::var("VRM_VIEWER_DEBUG_UV").is_ok() as i32;
         unsafe {
