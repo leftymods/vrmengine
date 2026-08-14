@@ -141,46 +141,53 @@ void main() {
         vec3 light = env * 0.65 + uKeyColor * key;
         vec3 pbr_col = albedo * light;
 
-        // VRM/MToon following three-vrm `mtoon.frag`. The toon factor is a
-        // step / smoothstep over dot(N, L); the direct light is FLAT (a
-        // constant light color times the mix of shade and albedo, with no
-        // N.L attenuation) so it never reads as a glossy hotspot. The
-        // indirect term is the MToon indirect intensity times a sky/ground
-        // irradiance (approximating the light probe the reference viewer
-        // gets from its HDR environment) times the albedo; the min-clamp to
-        // the albedo then keeps the lit surface from blowing out. Both
-        // paths are computed unconditionally and blended by `uMtoon` so the
-        // GLSL compiler keeps every MToon uniform live.
+        // -- Port of `bevy_shader_mtoon` (`mtoon.wgsl`) ---------------------
+        // Toon factor: dot(N, L) + shadeShift, mapped through a saturated
+        // LINEAR ramp (not a smoothstep) over [-1+toony, 1-toony]. The direct
+        // light is FLAT - mix(shade, albedo, shading) * lightColor, no N.L
+        // attenuation, no /PI, no min-clamp. The matte form comes from the
+        // hemisphere global-illumination term (normal-dependent, equalised
+        // toward the up/down average), which is what reads as soft cell
+        // shading instead of flat plastic or a glossy hotspot.
         vec3 shade = uShadeColor
             * (uHasShadeTex == 1 ? texture(uShadeTex, vUv).rgb : vec3(1.0));
-        float li = n_dot_l * uShadingGradeRate;
-        float f = uShadeToony >= 0.999
-            ? step(uShadeShift, li)
-            : smoothstep(uShadeShift, uShadeShift + (1.0 - uShadeToony), li);
-        vec3 irradiance =
-            mix(vec3(1.00, 1.00, 1.05), vec3(2.50, 2.40, 2.20), n.y * 0.5 + 0.5);
-        vec3 mtoon_col = uLightColor * mix(shade, albedo, f);
-        mtoon_col += uIndirectLight * irradiance * albedo;
-        mtoon_col = min(mtoon_col, albedo);
+        float shading = dot(n, keyDir) + uShadeShift;
+        float lo = -1.0 + uShadeToony;
+        float hi = 1.0 - uShadeToony;
+        float f = hi <= lo
+            ? (shading >= hi ? 1.0 : 0.0)
+            : clamp((shading - lo) / (hi - lo), 0.0, 1.0);
+        vec3 mtoon_col = mix(shade, albedo, f) * uLightColor;
 
-        // Parametric rim (three-vrm adds it after the clamp, full strength;
-        // the fixture's _RimColor is small but the high _RimFresnelPower
-        // makes the edge read as a hard glossy line, so soften the power
-        // and attenuate the contribution to a matte edge hint).
-        float rimF = pow(clamp(1.0 - dot(viewDir, n) + uRimLift, 0.0, 1.0), uRimPower * 0.5);
-        mtoon_col += uRimColor * rimF * 0.25;
-
-        // Additive matcap (sphere add) in view space.
-        if (uHasSphereTex == 1) {
-            vec3 x = normalize(vec3(viewDir.z, 0.0, -viewDir.x));
-            vec3 y = cross(viewDir, x);
-            vec2 sphereUv = 0.5 + 0.5 * vec2(dot(x, n), -dot(y, n));
-            mtoon_col += texture(uSphereTex, sphereUv).rgb;
-        }
+        // Global illumination: a sky/ground hemisphere times the albedo,
+        // equalised toward the up/down average (bevy's `gi_equalization_factor`
+        // = 0 -> use the raw, normal-dependent GI so the model keeps matte
+        // form instead of reading as flat plastic).
+        vec3 gi_up = vec3(0.95, 0.92, 0.88) * albedo;
+        vec3 gi_down = vec3(0.40, 0.42, 0.46) * albedo;
+        vec3 raw_gi = mix(gi_down, gi_up, n.y * 0.5 + 0.5);
+        vec3 uniform_gi = (gi_up + gi_down) * 0.5;
+        mtoon_col += mix(raw_gi, uniform_gi, 0.0);
 
         // Emission.
         mtoon_col += uEmissionColor
             * (uHasEmissionTex == 1 ? texture(uEmissionTex, vUv).rgb : vec3(1.0));
+
+        // Rim lighting: additive matcap (sphere add) plus a parametric fresnel
+        // rim, modulated by `mix(1, lighting, rimLightingMix)` exactly as in
+        // bevy_shader_mtoon.
+        vec3 rim = vec3(0.0);
+        if (uHasSphereTex == 1) {
+            vec3 x = normalize(vec3(viewDir.z, 0.0, -viewDir.x));
+            vec3 y = cross(viewDir, x);
+            vec2 sphereUv = vec2(dot(x, n), dot(y, n)) * 0.495 + 0.5;
+            rim = texture(uSphereTex, sphereUv).rgb;
+        }
+        float parametric = clamp(1.0 - dot(n, viewDir) + uRimLift, 0.0, 1.0);
+        parametric = pow(parametric, max(uRimPower, 0.00001));
+        rim += parametric * uRimColor;
+        rim *= mix(vec3(1.0), mtoon_col, uRimMix);
+        mtoon_col += rim;
 
         col = mix(pbr_col, mtoon_col, float(uMtoon));
     }
@@ -538,7 +545,7 @@ impl Renderer {
         self.set_mat4(self.u.view, &view);
         self.set_vec3(self.u.light_dir, &Vec3::new(0.4, 0.8, 0.5));
         self.set_vec3(self.u.key_color, &Vec3::splat(0.55));
-        self.set_vec3(self.u.light_color, &Vec3::splat(0.5));
+        self.set_vec3(self.u.light_color, &Vec3::splat(1.0));
         self.set_vec3(self.u.camera_pos, &camera_pos);
         let debug_uv = std::env::var("VRM_VIEWER_DEBUG_UV").is_ok() as i32;
         unsafe {
