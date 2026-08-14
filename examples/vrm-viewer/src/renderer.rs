@@ -57,6 +57,8 @@ uniform sampler2D uTex;
 uniform int uHasTex;
 uniform vec3 uLightDir;
 uniform vec3 uKeyColor;
+uniform vec3 uLightColor;
+uniform vec3 uAmbient;
 uniform vec3 uCameraPos;
 uniform int uDebugUv;
 uniform int uAlphaMode;
@@ -96,54 +98,51 @@ void main() {
     float n_dot_l = dot(n, keyDir);
 
     vec3 col;
-    if (uMtoon == 1) {
-        // VRM/MToon shading following bevy_shader_mtoon (unavi-xyz/bevy_vrm),
-        // the Rust port of the shader. VRM 0.0 `_ShadeShift` is negated and the
-        // toon factor is a linear_step over [-1+toony, 1-toony] of
-        // `dot(N, L) - _ShadeShift`; the diffuse lerps between the shade
-        // texture and the main texture. The result is lit with the same matte
-        // scene light as the PBR path and clamped to the albedo, so MToon
-        // shade regions appear without any specular gloss.
-        vec3 shade = uShadeColor
-            * (uHasShadeTex == 1 ? texture(uShadeTex, vUv).rgb : vec3(1.0));
-        float shading = n_dot_l + (-uShadeShift);
-        float ramp_a = -1.0 + uShadeToony;
-        float ramp_b = 1.0 - uShadeToony;
-        float f = ramp_b > ramp_a
-            ? clamp((shading - ramp_a) / (ramp_b - ramp_a), 0.0, 1.0)
-            : (shading > 0.0 ? 1.0 : 0.0);
-        vec3 env = mix(vec3(0.16, 0.17, 0.20), vec3(0.95, 0.92, 0.88), n.y * 0.5 + 0.5);
+    {
+        // Global (hemisphere) light: a warm sky gradient blended against a
+        // cool ground bounce by the normal direction, plus a soft wrapped key.
+        // Used by the non-MToon path.
+        float sky = n.y * 0.5 + 0.5;
+        vec3 env = mix(vec3(0.16, 0.17, 0.20), vec3(0.95, 0.92, 0.88), sky);
         float ndl = n_dot_l * 0.5 + 0.5;
         float key = ndl * ndl;
         vec3 light = env * 0.65 + uKeyColor * key;
-        col = mix(shade, albedo, f) * light;
-        col = min(col, albedo);
+        vec3 pbr_col = albedo * light;
+
+        // VRM/MToon following three-vrm mtoon.frag (the reference VRM viewer):
+        // the toon factor is a step/smoothstep over dot(N, L) with `_ShadeShift`
+        // used directly (VRM 0.0 does not negate it), and the direct light is
+        // FLAT - mix(shade, albedo, f) times a constant light color, no N·L
+        // attenuation. That flatness is what makes MToon read as matte instead
+        // of glossy. Both paths are computed unconditionally and blended by
+        // uMtoon so the GLSL compiler cannot drop the MToon uniforms.
+        vec3 shade = uShadeColor
+            * (uHasShadeTex == 1 ? texture(uShadeTex, vUv).rgb : vec3(1.0));
+        float li = n_dot_l * uShadingGradeRate;
+        float f = uShadeToony >= 0.999
+            ? step(uShadeShift, li)
+            : smoothstep(uShadeShift, uShadeShift + (1.0 - uShadeToony), li);
+        vec3 mtoon_col = uLightColor * mix(shade, albedo, f) + uAmbient * albedo;
+        mtoon_col = min(mtoon_col, albedo);
 
         // Parametric rim light. Kept at a quarter strength so the edge never
         // reads as a glossy specular sheen.
         float rimF = pow(clamp(1.0 - dot(viewDir, n) + uRimLift, 0.0, 1.0), uRimPower);
-        col += uRimColor * rimF * 0.25 * mix(vec3(1.0), light, uRimMix);
+        mtoon_col += uRimColor * rimF * 0.25 * mix(vec3(1.0), uLightColor, uRimMix);
 
         // Additive matcap (sphere add) in view space.
         if (uHasSphereTex == 1) {
             vec3 x = normalize(vec3(viewDir.z, 0.0, -viewDir.x));
             vec3 y = cross(viewDir, x);
             vec2 sphereUv = 0.5 + 0.5 * vec2(dot(x, n), -dot(y, n));
-            col += texture(uSphereTex, sphereUv).rgb;
+            mtoon_col += texture(uSphereTex, sphereUv).rgb;
         }
 
         // Emission.
-        col += uEmissionColor
+        mtoon_col += uEmissionColor
             * (uHasEmissionTex == 1 ? texture(uEmissionTex, vUv).rgb : vec3(1.0));
-    } else {
-        // Global (hemisphere) light: a warm sky gradient blended against a
-        // cool ground bounce by the normal direction, plus a soft wrapped key.
-        float sky = n.y * 0.5 + 0.5;
-        vec3 env = mix(vec3(0.16, 0.17, 0.20), vec3(0.95, 0.92, 0.88), sky);
-        float ndl = n_dot_l * 0.5 + 0.5;
-        float key = ndl * ndl;
-        vec3 light = env * 0.65 + uKeyColor * key;
-        col = albedo * light;
+
+        col = mix(pbr_col, mtoon_col, float(uMtoon));
     }
 
     // The default framebuffer is linear (not sRGB), so tonemap and
@@ -233,6 +232,8 @@ struct Uniforms {
     emission_color: Option<glow::UniformLocation>,
     has_emission_tex: Option<glow::UniformLocation>,
     has_sphere_tex: Option<glow::UniformLocation>,
+    light_color: Option<glow::UniformLocation>,
+    ambient: Option<glow::UniformLocation>,
 }
 
 pub struct Renderer {
@@ -287,7 +288,7 @@ impl Renderer {
             gl.bind_vertex_array(None);
         }
 
-        let materials = doc
+        let materials: Vec<MaterialInfo> = doc
             .materials()
             .enumerate()
             .map(|(i, m)| {
@@ -307,6 +308,11 @@ impl Renderer {
                 }
             })
             .collect();
+        let mtoon_count = materials.iter().filter(|m| m.mtoon.is_some()).count();
+        println!(
+            "renderer: {mtoon_count}/{} materials use VRM/MToon",
+            materials.len()
+        );
 
         let textures = upload_textures(&gl, doc, images);
 
@@ -340,8 +346,25 @@ impl Renderer {
                 emission_color: get("uEmissionColor"),
                 has_emission_tex: get("uHasEmissionTex"),
                 has_sphere_tex: get("uHasSphereTex"),
+                light_color: get("uLightColor"),
+                ambient: get("uAmbient"),
             }
         };
+        println!(
+            "uniforms: mtoon={} shade_color={} shade_shift={} shade_toony={} grade={} light_color={} ambient={} key_color={} has_shade={} rim={} emiss={} sphere={}",
+            u.mtoon.is_some(),
+            u.shade_color.is_some(),
+            u.shade_shift.is_some(),
+            u.shade_toony.is_some(),
+            u.shading_grade_rate.is_some(),
+            u.light_color.is_some(),
+            u.ambient.is_some(),
+            u.key_color.is_some(),
+            u.has_shade_tex.is_some(),
+            u.rim_color.is_some(),
+            u.emission_color.is_some(),
+            u.has_sphere_tex.is_some(),
+        );
         let msaa_samples = std::env::var("VRM_VIEWER_MSAA")
             .ok()
             .and_then(|s| s.trim().parse::<i32>().ok())
@@ -450,6 +473,8 @@ impl Renderer {
         self.set_mat4(self.u.view, &view);
         self.set_vec3(self.u.light_dir, &Vec3::new(0.4, 0.8, 0.5));
         self.set_vec3(self.u.key_color, &Vec3::splat(0.55));
+        self.set_vec3(self.u.light_color, &Vec3::splat(0.9));
+        self.set_vec3(self.u.ambient, &Vec3::new(0.14, 0.15, 0.17));
         self.set_vec3(self.u.camera_pos, &camera_pos);
         let debug_uv = std::env::var("VRM_VIEWER_DEBUG_UV").is_ok() as i32;
         unsafe {
