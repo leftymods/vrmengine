@@ -110,9 +110,17 @@ fn setup(mut commands: Commands) {
         Transform::from_xyz(0.0, 1.3, 3.0),
         PanOrbitCamera {
             focus: Vec3::new(0.0, 0.9, 0.0),
-            orbit_sensitivity: 0.35,
-            pan_sensitivity: 0.35,
-            zoom_sensitivity: 0.5,
+            // Raw mouse motion / wheel ticks are multiplied straight by
+            // these; keep them low so a full orbit needs a wide drag. A
+            // whole-window drag at 0.04 sweeps ~14 degrees.
+            orbit_sensitivity: 0.04,
+            pan_sensitivity: 0.05,
+            zoom_sensitivity: 0.1,
+            // Less input smoothing so the camera tracks the hand directly
+            // instead of gliding past the cursor stop point.
+            orbit_smoothness: 0.4,
+            pan_smoothness: 0.3,
+            zoom_smoothness: 0.4,
             ..default()
         },
     ));
