@@ -3,7 +3,7 @@
 //! window and `bevy_panorbit_camera` for the orbit camera. The engine side is
 //! Bevy 0.19 / wgpu (Vulkan); there is no custom OpenGL renderer anymore.
 
-use std::f32::consts::PI;
+use std::f32::consts::{FRAC_PI_2, PI};
 use std::sync::OnceLock;
 
 use bevy::asset::AssetMetaCheck;
@@ -11,13 +11,15 @@ use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::prelude::*;
 use bevy::render::view::Msaa;
 use bevy::window::FileDragAndDrop;
-use bevy_egui::{EguiPlugin, EguiPrimaryContextPass, EguiContexts};
+use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass};
 use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin};
 use bevy_vrm::{
     mtoon::MtoonSun,
     VrmInstance,
     VrmPlugins,
 };
+
+mod expressions;
 
 /// Build label baked by `build.rs` (`VRM_VIEWER_BUILD_HASH` + `..._BUILD_TIME`
 /// as `HH:MM:SS`). Shown in the egui window so the freshness of the binary is
@@ -59,6 +61,8 @@ fn main() {
             model,
             loaded: String::new(),
         })
+        .init_resource::<expressions::ExpressionRig>()
+        .init_resource::<AutoRotate>()
         .add_plugins((
             // Model paths are absolute (CLI arg / dropped file / baked
             // fixture path); Bevy denies loading files outside the asset root
@@ -74,7 +78,16 @@ fn main() {
         ))
         .add_systems(Startup, setup)
         .add_systems(EguiPrimaryContextPass, update_ui)
-        .add_systems(Update, (load_model, read_dropped_files))
+        .add_systems(
+            Update,
+            (
+                load_model,
+                read_dropped_files,
+                auto_rotate,
+                expressions::collect_rig,
+                expressions::apply_expressions,
+            ),
+        )
         // `bevy_world_serialization` spawns VRM scenes through the type
         // registry; with a minimal bevy feature set nothing registers the
         // standard scene components, and spawn panics on the first missing
@@ -175,7 +188,13 @@ fn read_dropped_files(mut events: MessageReader<FileDragAndDrop>, mut settings: 
     }
 }
 
-fn update_ui(mut contexts: EguiContexts, mut settings: ResMut<Settings>) {
+fn update_ui(
+    mut contexts: EguiContexts,
+    mut settings: ResMut<Settings>,
+    mut rig: ResMut<expressions::ExpressionRig>,
+    mut auto: ResMut<AutoRotate>,
+    mut panorbit: Query<&mut PanOrbitCamera>,
+) {
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
     };
@@ -191,7 +210,119 @@ fn update_ui(mut contexts: EguiContexts, mut settings: ResMut<Settings>) {
                 }
             });
             ui.label("Drop a .vrm file into the window to load it.");
+
+            // Camera view presets + turntable.
+            ui.separator();
+            ui.horizontal(|ui| {
+                ui.label("View:");
+                for (label, yaw, pitch, radius, focus) in VIEW_PRESETS {
+                    if ui.button(*label).clicked()
+                        && let Ok(mut cam) = panorbit.single_mut()
+                    {
+                        cam.target_yaw = *yaw;
+                        cam.target_pitch = *pitch;
+                        cam.target_radius = *radius;
+                        cam.focus = Vec3::from_array(*focus);
+                    }
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut auto.0, "Auto-rotate");
+                if ui.button("Reset view").clicked()
+                    && let Ok(mut cam) = panorbit.single_mut()
+                {
+                    let (_, yaw, pitch, radius, focus) = VIEW_PRESETS[2];
+                    cam.target_yaw = yaw;
+                    cam.target_pitch = pitch;
+                    cam.target_radius = radius;
+                    cam.focus = Vec3::from_array(focus);
+                }
+            });
+
             ui.separator();
             ui.label(build_label());
+        });
+
+    expressions_window(ctx, &mut rig);
+}
+
+/// Camera presets: `(label, yaw, pitch, radius, focus)`. The avatar faces
+/// +Z after the spawn-time Y flip, so yaw 0 is a frontal view.
+const VIEW_PRESETS: &[(&str, f32, f32, f32, [f32; 3])] = &[
+    ("Face", 0.0, -0.05, 0.9, [0.0, 1.45, 0.0]),
+    ("Upper", 0.0, -0.1, 1.9, [0.0, 1.2, 0.0]),
+    ("Full", 0.0, -0.15, 3.4, [0.0, 0.85, 0.0]),
+    ("Front", 0.0, -0.1, 2.8, [0.0, 1.05, 0.0]),
+    ("Back", PI, -0.1, 2.8, [0.0, 1.05, 0.0]),
+    ("Left", FRAC_PI_2, -0.1, 2.8, [0.0, 1.05, 0.0]),
+    ("Right", -FRAC_PI_2, -0.1, 2.8, [0.0, 1.05, 0.0]),
+];
+
+#[derive(Resource, Default)]
+struct AutoRotate(bool);
+
+/// Slow turntable spin while enabled.
+fn auto_rotate(time: Res<Time>, auto: Res<AutoRotate>, mut q: Query<&mut PanOrbitCamera>) {
+    if !auto.0 {
+        return;
+    }
+    for mut cam in &mut q {
+        cam.target_yaw += time.delta_secs() * 0.5;
+    }
+}
+
+/// Expression manager: sliders for every VRM blendshape group plus quick
+/// preset buttons and a reset.
+fn expressions_window(ctx: &mut bevy_egui::egui::Context, rig: &mut expressions::ExpressionRig) {
+    bevy_egui::egui::Window::new("Expressions")
+        .default_width(280.0)
+        .show(ctx, |ui| {
+            if !rig.parse_done() {
+                ui.label("waiting for model…");
+                return;
+            }
+            if rig.groups.is_empty() {
+                ui.label("no blend shapes in this model");
+                return;
+            }
+
+            bevy_egui::egui::Grid::new("expr_grid")
+                .num_columns(2)
+                .spacing([12.0, 4.0])
+                .show(ui, |ui| {
+                    for i in 0..rig.values.len() {
+                        ui.label(rig.groups[i].name.clone());
+                        if rig.groups[i].is_binary {
+                            let mut on = rig.values[i] > 0.5;
+                            if ui.checkbox(&mut on, "").changed() {
+                                rig.values[i] = if on { 1.0 } else { 0.0 };
+                            }
+                        } else {
+                            ui.add(bevy_egui::egui::Slider::new(
+                                &mut rig.values[i],
+                                0.0..=1.0,
+                            )
+                            .show_value(true));
+                        }
+                        ui.end_row();
+                    }
+                });
+
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                // One-click presets for the standard emotion groups.
+                for preset in ["joy", "angry", "sorrow", "fun", "blink"] {
+                    if ui.button(preset).clicked() {
+                        for (i, g) in rig.groups.iter().enumerate() {
+                            if g.name.eq_ignore_ascii_case(preset) {
+                                rig.values[i] = 1.0;
+                            }
+                        }
+                    }
+                }
+                if ui.button("Reset all").clicked() {
+                    rig.values.iter_mut().for_each(|v| *v = 0.0);
+                }
+            });
         });
 }

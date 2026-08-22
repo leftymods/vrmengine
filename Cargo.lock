@@ -4480,6 +4480,7 @@ dependencies = [
  "bevy_egui 0.41.1",
  "bevy_panorbit_camera",
  "bevy_vrm",
+ "serde_json",
 ]
 
 [[package]]
