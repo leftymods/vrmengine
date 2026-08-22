@@ -132,12 +132,12 @@ fn setup(mut commands: Commands) {
         Transform::from_xyz(0.0, 1.3, 3.0),
         PanOrbitCamera {
             focus: Vec3::new(0.0, 0.9, 0.0),
-            // Blender-style viewport controls: middle-mouse drag orbits,
-            // Shift+middle-mouse pans, wheel zooms. Left mouse stays free for
-            // the UI and never moves the camera.
-            button_orbit: bevy::input::mouse::MouseButton::Middle,
+            // Mouse-look controls: right-drag orbits, middle-drag pans,
+            // wheel zooms. No modifiers - every button works as a plain
+            // press so the scheme survives odd X11 button mappings. Left
+            // stays free for the UI and never moves the camera.
+            button_orbit: bevy::input::mouse::MouseButton::Right,
             button_pan: bevy::input::mouse::MouseButton::Middle,
-            modifier_pan: Some(KeyCode::ShiftLeft),
             // A full-window MMB drag sweeps ~216 degrees, close to Blender's
             // viewport feel; smoothing kept low so the camera tracks 1:1.
             orbit_sensitivity: 0.6,
@@ -223,7 +223,7 @@ fn update_ui(
             });
             ui.label("Drop a .vrm file into the window to load it.");
             ui.label(
-                "Controls: MMB drag = orbit, Shift+MMB = pan, wheel = zoom, \
+                "Controls: RMB drag = orbit, MMB drag = pan, wheel = zoom, \
                  WASD = move, E/Q = up/down.",
             );
 
@@ -327,15 +327,16 @@ fn wasd_move(
 #[derive(Resource, Default)]
 struct AutoRotate(bool);
 
-/// Slow turntable spin while enabled; pauses while the user holds the orbit
-/// button so the spin never fights a manual drag.
+/// Slow turntable spin while enabled; pauses while the user holds an orbit /
+/// pan button so the spin never fights a manual drag.
 fn auto_rotate(
     time: Res<Time>,
     auto: Res<AutoRotate>,
     mouse: Res<ButtonInput<bevy::input::mouse::MouseButton>>,
     mut q: Query<&mut PanOrbitCamera>,
 ) {
-    if !auto.0 || mouse.pressed(bevy::input::mouse::MouseButton::Middle) {
+    use bevy::input::mouse::MouseButton;
+    if !auto.0 || mouse.pressed(MouseButton::Right) || mouse.pressed(MouseButton::Middle) {
         return;
     }
     for mut cam in &mut q {
