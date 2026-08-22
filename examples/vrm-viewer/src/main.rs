@@ -7,7 +7,7 @@ use std::f32::consts::{FRAC_PI_2, PI};
 use std::sync::OnceLock;
 
 use bevy::asset::AssetMetaCheck;
-use bevy::core_pipeline::tonemapping::Tonemapping;
+use bevy::core_pipeline::tonemapping::{DebandDither, Tonemapping};
 use bevy::prelude::*;
 use bevy::render::view::Msaa;
 use bevy::window::FileDragAndDrop;
@@ -63,9 +63,10 @@ fn main() {
         })
         .init_resource::<expressions::ExpressionRig>()
         .init_resource::<AutoRotate>()
-        // Block camera input whenever the cursor is over any egui area, so
-        // clicking sliders / preset buttons never orbits the camera.
-        .insert_resource(bevy_panorbit_camera::EguiFocusIncludesHover(true))
+        // NOTE: no EguiFocusIncludesHover here. Orbit is bound to the middle
+        // mouse button, so left-clicks on UI can never move the camera; a
+        // hover-based block would only swallow legit MMB drags that start
+        // near the always-open egui windows.
         .add_plugins((
             // Model paths are absolute (CLI arg / dropped file / baked
             // fixture path); Bevy denies loading files outside the asset root
@@ -124,6 +125,10 @@ fn setup(mut commands: Commands) {
         Camera3d::default(),
         Msaa::Off,
         Tonemapping::None,
+        // Skip the deband fullscreen pass; every fragment counts on the
+        // software Vulkan pipeline and the sliders need all the FPS they can
+        // get for responsive feedback.
+        DebandDither::Disabled,
         Transform::from_xyz(0.0, 1.3, 3.0),
         PanOrbitCamera {
             focus: Vec3::new(0.0, 0.9, 0.0),
