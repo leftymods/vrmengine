@@ -7,7 +7,9 @@ use std::f32::consts::PI;
 use std::sync::OnceLock;
 
 use bevy::asset::AssetMetaCheck;
+use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::prelude::*;
+use bevy::render::view::Msaa;
 use bevy::window::FileDragAndDrop;
 use bevy_egui::{EguiPlugin, EguiPrimaryContextPass, EguiContexts};
 use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin};
@@ -97,11 +99,20 @@ struct Settings {
 }
 
 fn setup(mut commands: Commands) {
-    // Orbit camera framing the avatar head/chest.
+    // Orbit camera framing the avatar head/chest. We spawn the Camera3d
+    // ourselves so we can trim render cost for the software Vulkan pipeline
+    // (llvmpipe): MSAA off and no filmic tonemapping pass - MToon output is
+    // already in display range, like VRoid Studio.
     commands.spawn((
+        Camera3d::default(),
+        Msaa::Off,
+        Tonemapping::None,
         Transform::from_xyz(0.0, 1.3, 3.0),
         PanOrbitCamera {
             focus: Vec3::new(0.0, 0.9, 0.0),
+            orbit_sensitivity: 0.35,
+            pan_sensitivity: 0.35,
+            zoom_sensitivity: 0.5,
             ..default()
         },
     ));
