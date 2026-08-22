@@ -63,6 +63,9 @@ fn main() {
         })
         .init_resource::<expressions::ExpressionRig>()
         .init_resource::<AutoRotate>()
+        // Block camera input whenever the cursor is over any egui area, so
+        // clicking sliders / preset buttons never orbits the camera.
+        .insert_resource(bevy_panorbit_camera::EguiFocusIncludesHover(true))
         .add_plugins((
             // Model paths are absolute (CLI arg / dropped file / baked
             // fixture path); Bevy denies loading files outside the asset root

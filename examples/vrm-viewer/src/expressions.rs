@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use bevy::gltf::GltfMeshName;
-use bevy::mesh::morph::MorphWeights;
+use bevy::mesh::morph::{MeshMorphWeights, MorphWeights};
 use bevy::prelude::*;
 
 /// One VRM blendshape bind: drive morph target `morph_index` on every mesh
@@ -111,7 +111,7 @@ pub fn parse_vrm_expressions(path: &Path) -> Option<Vec<ExpressionGroup>> {
 pub fn collect_rig(
     settings: Res<crate::Settings>,
     mut rig: ResMut<ExpressionRig>,
-    named: Query<(Entity, &GltfMeshName)>,
+    primitives: Query<(Entity, &GltfMeshName, &MeshMorphWeights)>,
     weights_q: Query<&MorphWeights>,
 ) {
     if settings.loaded.is_empty() {
@@ -121,6 +121,11 @@ pub fn collect_rig(
     // New model: reset and parse; scene entities may not exist yet.
     if rig.built_for != settings.loaded {
         let groups = parse_vrm_expressions(Path::new(&settings.loaded)).unwrap_or_default();
+        info!(
+            "expressions: parsed {} group(s) from {}",
+            groups.len(),
+            settings.loaded
+        );
         let n = groups.len();
         *rig = ExpressionRig {
             built_for: settings.loaded.clone(),
@@ -140,26 +145,43 @@ pub fn collect_rig(
         return;
     }
     // Still waiting for the glTF scene to spawn its primitives.
-    if named.is_empty() || weights_q.is_empty() {
+    if primitives.is_empty() {
         return;
     }
 
+    // bevy_gltf puts `GltfMeshName` + a `MeshMorphWeights::Reference(parent)`
+    // on each primitive entity, while the actual `MorphWeights` live on the
+    // parent node (shared by all primitives of the mesh).
     let mut by_name: HashMap<String, Vec<Entity>> = HashMap::new();
-    for (entity, mesh_name) in &named {
-        by_name.entry(mesh_name.0.clone()).or_default().push(entity);
+    for (_, mesh_name, morph_ref) in &primitives {
+        let MeshMorphWeights::Reference(owner) = morph_ref else { continue };
+        by_name
+            .entry(mesh_name.0.clone())
+            .or_default()
+            .push(*owner);
     }
-    // Build locally, then commit, so groups/bindings never alias.
+    for owners in by_name.values_mut() {
+        owners.sort_unstable();
+        owners.dedup();
+    }
+
     let mut bindings = vec![Vec::new(); rig.groups.len()];
     for (gi, group) in rig.groups.iter().enumerate() {
         for bind in &group.binds {
-            for &entity in by_name.get(&bind.mesh_name).into_iter().flatten() {
-                let Ok(w) = weights_q.get(entity) else { continue };
+            for &owner in by_name.get(&bind.mesh_name).into_iter().flatten() {
+                let Ok(w) = weights_q.get(owner) else { continue };
                 if bind.morph_index < w.weights().len() {
-                    bindings[gi].push((entity, bind.morph_index, bind.weight));
+                    bindings[gi].push((owner, bind.morph_index, bind.weight));
                 }
             }
         }
     }
+    let total: usize = bindings.iter().map(Vec::len).sum();
+    info!(
+        "expressions: resolved {total} bind target(s) across {} mesh owner(s); groups with no targets: {}",
+        by_name.len(),
+        bindings.iter().filter(|b| b.is_empty()).count()
+    );
     rig.bindings = bindings;
     rig.resolved = true;
 }
