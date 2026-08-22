@@ -87,7 +87,7 @@ fn main() {
                 load_model,
                 read_dropped_files,
                 auto_rotate,
-                view_hotkeys,
+                wasd_move,
                 expressions::collect_rig,
                 expressions::apply_expressions,
             ),
@@ -218,22 +218,19 @@ fn update_ui(
             });
             ui.label("Drop a .vrm file into the window to load it.");
             ui.label(
-                "Controls (Blender-style): MMB drag = orbit, Shift+MMB = pan, \
-                 wheel = zoom; 1/3/7 views (Ctrl = opposite), Home = frame all.",
+                "Controls: MMB drag = orbit, Shift+MMB = pan, wheel = zoom, \
+                 WASD = move, E/Q = up/down.",
             );
 
             // Camera view presets + turntable.
             ui.separator();
             ui.horizontal(|ui| {
                 ui.label("View:");
-                for (label, yaw, pitch, radius, focus) in VIEW_PRESETS {
+                for (idx, (label, ..)) in VIEW_PRESETS.iter().enumerate() {
                     if ui.button(*label).clicked()
                         && let Ok(mut cam) = panorbit.single_mut()
                     {
-                        cam.target_yaw = *yaw;
-                        cam.target_pitch = *pitch;
-                        cam.target_radius = *radius;
-                        cam.focus = Vec3::from_array(*focus);
+                        apply_preset(&mut cam, idx);
                     }
                 }
             });
@@ -242,11 +239,7 @@ fn update_ui(
                 if ui.button("Reset view").clicked()
                     && let Ok(mut cam) = panorbit.single_mut()
                 {
-                    let (_, yaw, pitch, radius, focus) = VIEW_PRESETS[2];
-                    cam.target_yaw = yaw;
-                    cam.target_pitch = pitch;
-                    cam.target_radius = radius;
-                    cam.focus = Vec3::from_array(focus);
+                    apply_preset(&mut cam, PRESET_HOME);
                 }
             });
 
@@ -270,12 +263,7 @@ const VIEW_PRESETS: &[(&str, f32, f32, f32, [f32; 3])] = &[
     ("Top", 0.0, -1.35, 3.0, [0.0, 0.95, 0.0]),
 ];
 
-// Preset indices used by the Blender-style numpad hotkeys.
-const PRESET_FRONT: usize = 3;
-const PRESET_BACK: usize = 4;
-const PRESET_LEFT: usize = 5;
-const PRESET_RIGHT: usize = 6;
-const PRESET_TOP: usize = 7;
+// Default preset used by the "Reset view" button.
 const PRESET_HOME: usize = 2;
 
 fn apply_preset(cam: &mut PanOrbitCamera, idx: usize) {
@@ -286,34 +274,48 @@ fn apply_preset(cam: &mut PanOrbitCamera, idx: usize) {
     cam.focus = Vec3::from_array(focus);
 }
 
-/// Blender-style viewport hotkeys: `1` front (`Ctrl` back), `3` right
-/// (`Ctrl` left), `7` top, `Home` frame-all. Ignored while egui wants the
-/// keyboard (e.g. typing in the model path field).
-fn view_hotkeys(
+/// Fly-style movement: WASD moves the orbit rig across the ground plane
+/// relative to where the camera looks, E/Q move straight up/down. Speed
+/// scales with zoom distance so it feels identical at any radius.
+/// Ignored while egui wants the keyboard (typing in the path field).
+fn wasd_move(
+    time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
     egui_focus: Res<EguiWantsFocus>,
     mut q: Query<&mut PanOrbitCamera>,
 ) {
-    if egui_focus.prev || egui_focus.curr || !q.single().is_ok() {
+    if egui_focus.prev || egui_focus.curr {
         return;
     }
-    let ctrl = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
-    let digit = |a: KeyCode, b: KeyCode| keys.just_pressed(a) || keys.just_pressed(b);
-    let Ok(mut cam) = q.single_mut() else { return };
+    for mut cam in &mut q {
+        let rot = Quat::from_axis_angle(Vec3::Y, cam.target_yaw);
+        let forward = rot * Vec3::NEG_Z;
+        let right = rot * Vec3::X;
 
-    let preset = if digit(KeyCode::Digit1, KeyCode::Numpad1) {
-        Some(if ctrl { PRESET_BACK } else { PRESET_FRONT })
-    } else if digit(KeyCode::Digit3, KeyCode::Numpad3) {
-        Some(if ctrl { PRESET_LEFT } else { PRESET_RIGHT })
-    } else if digit(KeyCode::Digit7, KeyCode::Numpad7) {
-        Some(PRESET_TOP)
-    } else if keys.just_pressed(KeyCode::Home) {
-        Some(PRESET_HOME)
-    } else {
-        None
-    };
-    if let Some(idx) = preset {
-        apply_preset(&mut cam, idx);
+        let mut dir = Vec3::ZERO;
+        if keys.pressed(KeyCode::KeyW) {
+            dir += forward;
+        }
+        if keys.pressed(KeyCode::KeyS) {
+            dir -= forward;
+        }
+        if keys.pressed(KeyCode::KeyD) {
+            dir += right;
+        }
+        if keys.pressed(KeyCode::KeyA) {
+            dir -= right;
+        }
+        if keys.pressed(KeyCode::KeyE) {
+            dir += Vec3::Y;
+        }
+        if keys.pressed(KeyCode::KeyQ) {
+            dir -= Vec3::Y;
+        }
+        if dir == Vec3::ZERO {
+            continue;
+        }
+        let speed = cam.target_radius.max(0.5);
+        cam.target_focus += dir.normalize_or_zero() * speed * time.delta_secs();
     }
 }
 
