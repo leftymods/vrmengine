@@ -12,7 +12,7 @@ use bevy::prelude::*;
 use bevy::render::view::Msaa;
 use bevy::window::FileDragAndDrop;
 use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass};
-use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin};
+use bevy_panorbit_camera::{EguiWantsFocus, PanOrbitCamera, PanOrbitCameraPlugin};
 use bevy_vrm::{
     mtoon::MtoonSun,
     VrmInstance,
@@ -87,6 +87,7 @@ fn main() {
                 load_model,
                 read_dropped_files,
                 auto_rotate,
+                view_hotkeys,
                 expressions::collect_rig,
                 expressions::apply_expressions,
             ),
@@ -126,17 +127,20 @@ fn setup(mut commands: Commands) {
         Transform::from_xyz(0.0, 1.3, 3.0),
         PanOrbitCamera {
             focus: Vec3::new(0.0, 0.9, 0.0),
-            // Raw mouse motion / wheel ticks are multiplied straight by
-            // these; keep them low so a full orbit needs a wide drag. A
-            // whole-window drag at 0.04 sweeps ~14 degrees.
-            orbit_sensitivity: 0.04,
-            pan_sensitivity: 0.05,
-            zoom_sensitivity: 0.1,
-            // Less input smoothing so the camera tracks the hand directly
-            // instead of gliding past the cursor stop point.
-            orbit_smoothness: 0.4,
-            pan_smoothness: 0.3,
-            zoom_smoothness: 0.4,
+            // Blender-style viewport controls: middle-mouse drag orbits,
+            // Shift+middle-mouse pans, wheel zooms. Left mouse stays free for
+            // the UI and never moves the camera.
+            button_orbit: bevy::input::mouse::MouseButton::Middle,
+            button_pan: bevy::input::mouse::MouseButton::Middle,
+            modifier_pan: Some(KeyCode::ShiftLeft),
+            // A full-window MMB drag sweeps ~216 degrees, close to Blender's
+            // viewport feel; smoothing kept low so the camera tracks 1:1.
+            orbit_sensitivity: 0.6,
+            pan_sensitivity: 0.6,
+            zoom_sensitivity: 0.4,
+            orbit_smoothness: 0.25,
+            pan_smoothness: 0.2,
+            zoom_smoothness: 0.25,
             ..default()
         },
     ));
@@ -213,6 +217,10 @@ fn update_ui(
                 }
             });
             ui.label("Drop a .vrm file into the window to load it.");
+            ui.label(
+                "Controls (Blender-style): MMB drag = orbit, Shift+MMB = pan, \
+                 wheel = zoom; 1/3/7 views (Ctrl = opposite), Home = frame all.",
+            );
 
             // Camera view presets + turntable.
             ui.separator();
@@ -259,14 +267,68 @@ const VIEW_PRESETS: &[(&str, f32, f32, f32, [f32; 3])] = &[
     ("Back", PI, -0.1, 2.8, [0.0, 1.05, 0.0]),
     ("Left", FRAC_PI_2, -0.1, 2.8, [0.0, 1.05, 0.0]),
     ("Right", -FRAC_PI_2, -0.1, 2.8, [0.0, 1.05, 0.0]),
+    ("Top", 0.0, -1.35, 3.0, [0.0, 0.95, 0.0]),
 ];
+
+// Preset indices used by the Blender-style numpad hotkeys.
+const PRESET_FRONT: usize = 3;
+const PRESET_BACK: usize = 4;
+const PRESET_LEFT: usize = 5;
+const PRESET_RIGHT: usize = 6;
+const PRESET_TOP: usize = 7;
+const PRESET_HOME: usize = 2;
+
+fn apply_preset(cam: &mut PanOrbitCamera, idx: usize) {
+    let (_, yaw, pitch, radius, focus) = VIEW_PRESETS[idx];
+    cam.target_yaw = yaw;
+    cam.target_pitch = pitch;
+    cam.target_radius = radius;
+    cam.focus = Vec3::from_array(focus);
+}
+
+/// Blender-style viewport hotkeys: `1` front (`Ctrl` back), `3` right
+/// (`Ctrl` left), `7` top, `Home` frame-all. Ignored while egui wants the
+/// keyboard (e.g. typing in the model path field).
+fn view_hotkeys(
+    keys: Res<ButtonInput<KeyCode>>,
+    egui_focus: Res<EguiWantsFocus>,
+    mut q: Query<&mut PanOrbitCamera>,
+) {
+    if egui_focus.prev || egui_focus.curr || !q.single().is_ok() {
+        return;
+    }
+    let ctrl = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
+    let digit = |a: KeyCode, b: KeyCode| keys.just_pressed(a) || keys.just_pressed(b);
+    let Ok(mut cam) = q.single_mut() else { return };
+
+    let preset = if digit(KeyCode::Digit1, KeyCode::Numpad1) {
+        Some(if ctrl { PRESET_BACK } else { PRESET_FRONT })
+    } else if digit(KeyCode::Digit3, KeyCode::Numpad3) {
+        Some(if ctrl { PRESET_LEFT } else { PRESET_RIGHT })
+    } else if digit(KeyCode::Digit7, KeyCode::Numpad7) {
+        Some(PRESET_TOP)
+    } else if keys.just_pressed(KeyCode::Home) {
+        Some(PRESET_HOME)
+    } else {
+        None
+    };
+    if let Some(idx) = preset {
+        apply_preset(&mut cam, idx);
+    }
+}
 
 #[derive(Resource, Default)]
 struct AutoRotate(bool);
 
-/// Slow turntable spin while enabled.
-fn auto_rotate(time: Res<Time>, auto: Res<AutoRotate>, mut q: Query<&mut PanOrbitCamera>) {
-    if !auto.0 {
+/// Slow turntable spin while enabled; pauses while the user holds the orbit
+/// button so the spin never fights a manual drag.
+fn auto_rotate(
+    time: Res<Time>,
+    auto: Res<AutoRotate>,
+    mouse: Res<ButtonInput<bevy::input::mouse::MouseButton>>,
+    mut q: Query<&mut PanOrbitCamera>,
+) {
+    if !auto.0 || mouse.pressed(bevy::input::mouse::MouseButton::Middle) {
         return;
     }
     for mut cam in &mut q {
