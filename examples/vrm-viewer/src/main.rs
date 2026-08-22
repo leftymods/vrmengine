@@ -1,719 +1,178 @@
-//! A minimal OpenGL viewer for VRM models.
-//!
-//! Usage: `cargo run -p vrm-viewer -- <model.vrm>`
-//!
-//! Controls:
-//! - drag with left mouse button: orbit
-//! - drag with right mouse button: pan
-//! - scroll wheel: zoom
-//! - expression sliders in the "Expressions" panel
-//! - `1`..`=` : set a facial expression (happy, angry, sad, surprised,
-//!   relaxed, blink, neutral, aa, ih, ou, oh, ee)
-//! - `r`      : reset pose and expressions
-//! - drop a `.vrm`/`.glb` file on the window (or type a path in the
-//!   "Load model" panel) to switch models
-//! - `Esc`    : quit
+//! Drag-and-drop VRM viewer built on `bevy_vrm` (which pulls in the
+//! `bevy_shader_mtoon` WGSL shader unchanged) + `bevy_egui` for the control
+//! window and `bevy_panorbit_camera` for the orbit camera. The engine side is
+//! Bevy 0.19 / wgpu (Vulkan); there is no custom OpenGL renderer anymore.
 
-mod camera;
-mod model;
-mod renderer;
+use std::f32::consts::PI;
+use std::sync::OnceLock;
 
-use std::time::Instant;
-
-use glow::HasContext;
-use glutin::{
-    config::{ConfigSurfaceTypes, ConfigTemplateBuilder},
-    context::{ContextApi, ContextAttributesBuilder},
-    display::{Display, DisplayApiPreference},
-    prelude::*,
-    surface::{PbufferSurface, Surface, SurfaceAttributesBuilder, WindowSurface},
+use bevy::asset::AssetMetaCheck;
+use bevy::prelude::*;
+use bevy::window::FileDragAndDrop;
+use bevy_egui::{EguiPlugin, EguiPrimaryContextPass, EguiContexts};
+use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin};
+use bevy_vrm::{
+    mtoon::MtoonSun,
+    VrmInstance,
+    VrmPlugins,
 };
-use winit::application::ApplicationHandler;
-use winit::dpi::LogicalSize;
-use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::keyboard::{Key, NamedKey};
-use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle};
-use winit::window::{Window, WindowId};
 
-use camera::Camera;
-use model::ViewModel;
-use renderer::Renderer;
-use vrm_engine::{ExpressionId, ExpressionPreset, LoadedModel};
+/// Build label baked by `build.rs` (`VRM_VIEWER_BUILD_HASH` + `..._BUILD_TIME`
+/// as `HH:MM:SS`). Shown in the egui window so the freshness of the binary is
+/// visible at a glance.
+static BUILD_LABEL: OnceLock<String> = OnceLock::new();
 
-struct Viewer {
-    window: Window,
-    _display: Display,
-    _context: glutin::context::PossiblyCurrentContext,
-    surface: Surface<WindowSurface>,
-    renderer: Renderer,
-    view_model: ViewModel,
-    model: LoadedModel,
-    camera: Camera,
-    size: (u32, u32),
-    last_frame: Instant,
-    dragging: Option<MouseButton>,
-    last_cursor: (f64, f64),
-    fps_frames: u32,
-    fps_time: f32,
-    egui_ctx: egui::Context,
-    egui_state: egui_winit::State,
-    egui_painter: egui_glow::Painter,
-    build_label: String,
-    path_input: String,
-    status: Option<String>,
-}
-
-impl Viewer {
-    fn new(event_loop: &ActiveEventLoop, model: LoadedModel, path: String) -> Self {
-        let window = event_loop
-            .create_window(
-                Window::default_attributes()
-                    .with_title("vrm-viewer")
-                    .with_inner_size(LogicalSize::new(1280.0, 720.0)),
-            )
-            .expect("window");
-
-        let raw_window = window.window_handle().unwrap().as_raw();
-        let raw_display = window.display_handle().unwrap().as_raw();
-
-        #[cfg(target_os = "windows")]
-        let preference = DisplayApiPreference::Wgl(raw_window);
-        #[cfg(not(target_os = "windows"))]
-        let preference = DisplayApiPreference::Egl;
-
-        let gl_display = unsafe { Display::new(raw_display, preference) }.expect("gl display");
-
-        let config_template = ConfigTemplateBuilder::new()
-            .with_depth_size(24)
-            .with_alpha_size(8);
-        let config = unsafe {
-            gl_display
-                .find_configs(config_template.build())
-                .expect("no configs")
-                .find(|c| c.depth_size() > 0)
-                .expect("no config with depth buffer")
-        };
-
-        let context_attributes = ContextAttributesBuilder::new()
-            .with_context_api(ContextApi::OpenGl(Some(glutin::context::Version::new(3, 3))))
-            .build(Some(raw_window));
-        let context = unsafe {
-            gl_display
-                .create_context(&config, &context_attributes)
-                .expect("context")
-        };
-
-        let size = window.inner_size();
-        let width = std::num::NonZeroU32::new(size.width).unwrap();
-        let height = std::num::NonZeroU32::new(size.height).unwrap();
-        let surface_attributes = SurfaceAttributesBuilder::<WindowSurface>::new().build(raw_window, width, height);
-        let surface = unsafe {
-            gl_display
-                .create_window_surface(&config, &surface_attributes)
-                .expect("surface")
-        };
-        let context = context.make_current(&surface).expect("make current");
-
-        let gl = unsafe {
-            glow::Context::from_loader_function(|s| {
-                let c = std::ffi::CString::new(s).unwrap();
-                gl_display.get_proc_address(&c)
-            })
-        };
-
-        let view_model = model::extract(&model);
-        let mut camera = Camera::default();
-        camera.frame(view_model.aabb_min, view_model.aabb_max);
-
-        let renderer = Renderer::new(std::sync::Arc::new(gl), &model.vrm.doc, &model.images, &model.vrm.material_properties);
-        window.set_title(&format!(
-            "vrm-viewer - {}",
-            model_path(&model)
-        ));
-
-        let egui_ctx = egui::Context::default();
-        let egui_state = egui_winit::State::new(
-            egui_ctx.clone(),
-            egui::ViewportId::ROOT,
-            &window.display_handle().unwrap(),
-            Some(window.scale_factor() as f32),
-            window.theme(),
-            None,
-        );
-        let egui_painter = egui_glow::Painter::new(renderer.gl_arc(), "", None, true)
-            .expect("egui painter");
-
-        Self {
-            window,
-            _display: gl_display,
-            _context: context,
-            surface,
-            renderer,
-            view_model,
-            model,
-            camera,
-            size: (size.width, size.height),
-            last_frame: Instant::now(),
-            dragging: None,
-            last_cursor: (0.0, 0.0),
-            fps_frames: 0,
-            fps_time: 0.0,
-            egui_ctx,
-            egui_state,
-            egui_painter,
-            build_label: build_label(),
-            path_input: path,
-            status: None,
-        }
-    }
-
-    /// Replace the loaded model with the one at `path` (a .vrm/.glb file).
-    fn load_model(&mut self, path: &str) -> Result<(), String> {
-        let model = vrm_engine::load_glb_from_path(path)
-            .map_err(|e| format!("failed to load {path}: {e}"))?;
-        let view_model = model::extract(&model);
-        let mut camera = Camera::default();
-        camera.frame(view_model.aabb_min, view_model.aabb_max);
-        let renderer = Renderer::new(
-            self.renderer.gl_arc(),
-            &model.vrm.doc,
-            &model.images,
-            &model.vrm.material_properties,
-        );
-        self.model = model;
-        self.view_model = view_model;
-        self.camera = camera;
-        self.renderer = renderer;
-        self.window.set_title(&format!("vrm-viewer - {}", model_path(&self.model)));
-        println!(
-            "loaded {} (VRM {}): {} nodes, {} meshes, {} spring groups",
-            model_path(&self.model),
-            self.model.vrm.version,
-            self.model.vrm.node_count(),
-            self.model.vrm.doc.meshes().len(),
-            self.model.vrm.spring_bones.groups.len(),
-        );
-        Ok(())
-    }
-
-    fn render_frame(&mut self) {
-        let now = Instant::now();
-        let dt = (now - self.last_frame).as_secs_f32().min(0.1);
-        self.last_frame = now;
-
-        step_and_render(
-            &mut self.model,
-            &mut self.view_model,
-            &self.camera,
-            &mut self.renderer,
-            self.size,
-            dt,
-        );
-        self.paint_ui();
-        self.surface.swap_buffers(&self._context).ok();
-
-        self.fps_frames += 1;
-        self.fps_time += dt;
-        if self.fps_time >= 0.5 {
-            let fps = self.fps_frames as f32 / self.fps_time;
-            self.window.set_title(&format!(
-                "vrm-viewer - {} - {:.0} fps",
-                model_path(&self.model),
-                fps
-            ));
-            self.fps_frames = 0;
-            self.fps_time = 0.0;
-        }
-    }
-
-    fn apply_expression(&mut self, preset: ExpressionPreset, weight: f32) {
-        self.model
-            .vrm
-            .set_expression(&vrm_engine::ExpressionId::Preset(preset), weight);
-        self.model.vrm.apply_expressions();
-    }
-
-    /// Render the egui overlay (expression sliders) on top of the 3D scene.
-    ///
-    /// Must be called with the default framebuffer bound, before
-    /// `swap_buffers`; `Renderer::render` resolves its MSAA target into that
-    /// framebuffer, and the egui painter draws on top of it.
-    fn paint_ui(&mut self) {
-        let raw_input = self.egui_state.take_egui_input(&self.window);
-        let mut changes: Vec<(ExpressionId, f32)> = Vec::new();
-        let mut reset = false;
-        let mut pending_load: Option<String> = None;
-
-        let mut full_output = self.egui_ctx.run_ui(raw_input, |ui| {
-            egui::Window::new("Expressions")
-                .default_pos([8.0, 8.0])
-                .show(ui.ctx(), |ui| {
-                    for id in self.model.vrm.expressions.ids() {
-                        let name = id.name();
-                        let mut w = self.model.vrm.expression_weight(id);
-                        if ui
-                            .add(egui::Slider::new(&mut w, 0.0..=1.0).text(name))
-                            .changed()
-                        {
-                            changes.push((id.clone(), w));
-                        }
-                    }
-                    ui.separator();
-                    if ui.button("Reset all expressions").clicked() {
-                        reset = true;
-                    }
-                    ui.label("LMB orbit · RMB pan · wheel zoom");
-                    ui.label("1-0/-= expressions · r reset · Esc quit");
-                });
-
-            // Load-model panel: type a path or drop a .vrm/.glb file anywhere
-            // on the window.
-            egui::Window::new("Load model")
-                .default_pos([8.0, 300.0])
-                .show(ui.ctx(), |ui| {
-                    ui.horizontal(|ui| {
-                        ui.add(
-                            egui::TextEdit::singleline(&mut self.path_input)
-                                .desired_width(300.0)
-                                .hint_text("path/to/model.vrm"),
-                        );
-                        if ui.button("Load").clicked() {
-                            pending_load = Some(self.path_input.trim().to_string());
-                        }
-                    });
-                    if let Some(status) = &self.status {
-                        ui.label(egui::RichText::new(status).small());
-                    } else {
-                        ui.label("or drag & drop a .vrm/.glb file onto the window");
-                    }
-                });
-
-            // Build label in the bottom-right corner so the user can verify
-            // which build is running.
-            egui::Area::new(egui::Id::new("build-label"))
-                .anchor(egui::Align2::RIGHT_BOTTOM, [-8.0, -6.0])
-                .order(egui::Order::Foreground)
-                .show(ui.ctx(), |ui| {
-                    ui.label(
-                        egui::RichText::new(&self.build_label)
-                            .size(13.0)
-                            .color(egui::Color32::from_rgba_unmultiplied(220, 220, 220, 190)),
-                    );
-                });
-        });
-
-        self.egui_state
-            .handle_platform_output(&self.window, full_output.platform_output);
-        let clipped = self
-            .egui_ctx
-            .tessellate(full_output.shapes, full_output.pixels_per_point);
-        let (width, height) = self.size;
-        self.egui_painter.paint_and_update_textures(
-            [width, height],
-            full_output.pixels_per_point,
-            &clipped,
-            &mut full_output.textures_delta,
-        );
-
-        if let Some(path) = pending_load {
-            self.status = Some(match self.load_model(&path) {
-                Ok(()) => format!("loaded {path}"),
-                Err(e) => e,
-            });
-        } else if reset {
-            self.model.vrm.reset_expressions();
+fn build_label() -> &'static str {
+    BUILD_LABEL.get_or_init(|| {
+        let hash = option_env!("VRM_VIEWER_BUILD_HASH").unwrap_or("unknown");
+        let secs: u64 = option_env!("VRM_VIEWER_BUILD_TIME")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        let time = if secs > 0 {
+            let h = (secs / 3_600) % 24;
+            let m = (secs / 60) % 60;
+            let s = secs % 60;
+            format!("{h:02}:{m:02}:{s:02}")
         } else {
-            for (id, weight) in changes {
-                self.model.vrm.set_expression(&id, weight);
-            }
-            self.model.vrm.apply_expressions();
-        }
-    }
-}
-
-fn model_path(model: &LoadedModel) -> String {
-    model
-        .vrm
-        .meta
-        .name
-        .clone()
-        .unwrap_or_else(|| format!("vrm {}", model.vrm.version))
-}
-
-/// Build label shown in the bottom-right corner: git hash (baked at compile
-/// time) plus the real build time read from the executable's modification
-/// timestamp at startup, formatted in local time.
-fn build_label() -> String {
-    let hash = env!("VRM_VIEWER_BUILD_HASH");
-    let stamp = std::env::current_exe()
-        .ok()
-        .and_then(|p| std::fs::metadata(p).ok())
-        .and_then(|m| m.modified().ok())
-        .and_then(|t| {
-            let secs = t
-                .duration_since(std::time::UNIX_EPOCH)
-                .ok()
-                .map(|d| d.as_secs() as i64)?;
-            Some(secs)
-        })
-        .map(localtime_format)
-        .unwrap_or_else(|| "unknown build time".to_string());
-    format!("vrm-viewer {hash} build {stamp}")
-}
-
-fn localtime_format(secs: i64) -> String {
-    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-    let secs = secs as libc::time_t;
-    unsafe { libc::localtime_r(&secs, &mut tm) };
-    format!(
-        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
-        tm.tm_year + 1900,
-        tm.tm_mon + 1,
-        tm.tm_mday,
-        tm.tm_hour,
-        tm.tm_min,
-        tm.tm_sec
-    )
-}
-
-/// Advance the simulation by `dt` seconds and draw a frame.
-fn step_and_render(
-    model: &mut LoadedModel,
-    view_model: &mut ViewModel,
-    camera: &Camera,
-    renderer: &mut Renderer,
-    size: (u32, u32),
-    dt: f32,
-) {
-    let eye = camera.eye();
-    model.vrm.update_spring_bones(dt);
-    model.vrm.update_look_at(eye);
-    model.vrm.update_transforms();
-
-    view_model.apply_morph(&model.vrm);
-    view_model.update_skins(&model.vrm);
-
-    let view = camera.view();
-    let proj = camera.proj(size.0 as f32 / size.1.max(1) as f32);
-    renderer.render(&model.vrm, view_model, view, proj, eye, size.0, size.1);
-}
-
-/// Render off-screen into an EGL pbuffer and dump the frame as a PPM image.
-///
-/// Enabled by setting `VRM_VIEWER_HEADLESS_PPM=<out.ppm>`; useful to verify
-/// rendering without a window or compositor (and for CI smoke tests).
-fn headless_render(path: &str, out_ppm: &str) {
-    let mut model =
-        vrm_engine::load_glb_from_path(path).unwrap_or_else(|e| panic!("failed to load {path}: {e}"));
-
-    let event_loop = EventLoop::new().expect("event loop");
-    let raw_display = event_loop.display_handle().unwrap().as_raw();
-    let gl_display = unsafe { Display::new(raw_display, DisplayApiPreference::Egl) }
-        .expect("gl display");
-
-    let config_template = ConfigTemplateBuilder::new()
-        .with_depth_size(24)
-        .with_alpha_size(8)
-        .with_surface_type(ConfigSurfaceTypes::PBUFFER);
-    let config = unsafe {
-        gl_display
-            .find_configs(config_template.build())
-            .expect("no configs")
-            .find(|c| c.depth_size() > 0)
-            .expect("no config with depth buffer")
-    };
-
-    let context_attributes = ContextAttributesBuilder::new()
-        .with_context_api(ContextApi::OpenGl(Some(glutin::context::Version::new(3, 3))))
-        .build(None);
-    let context = unsafe {
-        gl_display
-            .create_context(&config, &context_attributes)
-            .expect("context")
-    };
-
-    let (width, height) = (1280u32, 720u32);
-    let surface_attributes = SurfaceAttributesBuilder::<PbufferSurface>::new().build(
-        std::num::NonZeroU32::new(width).unwrap(),
-        std::num::NonZeroU32::new(height).unwrap(),
-    );
-    let surface = unsafe {
-        gl_display
-            .create_pbuffer_surface(&config, &surface_attributes)
-            .expect("pbuffer surface")
-    };
-    let _context = context.make_current(&surface).expect("make current");
-
-    let gl = unsafe {
-        glow::Context::from_loader_function(|s| {
-            let c = std::ffi::CString::new(s).unwrap();
-            gl_display.get_proc_address(&c)
-        })
-    };
-    let mut renderer = Renderer::new(std::sync::Arc::new(gl), &model.vrm.doc, &model.images, &model.vrm.material_properties);
-    let mut view_model = model::extract(&model);
-    let mut camera = Camera::default();
-    camera.frame(view_model.aabb_min, view_model.aabb_max);
-    if let (Ok(y), Ok(p), Ok(d)) = (
-        std::env::var("VRM_VIEWER_YAW"),
-        std::env::var("VRM_VIEWER_PITCH"),
-        std::env::var("VRM_VIEWER_DIST"),
-    ) {
-        camera.yaw = y.parse().unwrap();
-        camera.pitch = p.parse().unwrap();
-        camera.dist = d.parse().unwrap();
-    }
-
-    // Simulate a few frames so spring bones settle into a pose.
-    if let Ok(expr) = std::env::var("VRM_VIEWER_EXPRESSION") {
-        if let Some(id) = ExpressionId::preset(&expr) {
-            model.vrm.set_expression(&id, 1.0);
-            model.vrm.apply_expressions();
-            println!("expression {expr} applied");
-            for e in model.vrm.expressions.expressions() {
-                if e.id == id {
-                    println!(
-                        "  expr {} binds={} override={:?} is_binary={}",
-                        e.id,
-                        e.morph_binds.len(),
-                        e.override_blink,
-                        e.is_binary,
-                    );
-                    for b in &e.morph_binds {
-                        println!("    bind node={} morph={} weight={}", b.node, b.index, b.weight);
-                    }
-                }
-            }
-            println!(
-                "  nodes_with_weights:"
-            );
-            for n in 0..model.vrm.node_count() {
-                let w = model.vrm.morph_weights(n);
-                if let Some(w) = w {
-                    if w.iter().any(|&x| x != 0.0) {
-                        println!("  node {n} weights={w:?}");
-                    }
-                }
-            }
-            println!("  view model meshes (node, morphs):");
-            for m in &view_model.meshes {
-                println!(
-                    "    node={} morphs={}",
-                    m.node,
-                    m.morph_delta_pos.len(),
-                );
-            }
-        } else {
-            eprintln!("unknown expression preset: {expr}");
-        }
-    }
-    for _ in 0..30 {
-        step_and_render(
-            &mut model,
-            &mut view_model,
-            &camera,
-            &mut renderer,
-            (width, height),
-            1.0 / 60.0,
-        );
-    }
-
-    let gl = renderer.gl();
-    let mut pixels = vec![0u8; (width * height * 4) as usize];
-    unsafe {
-        gl.read_buffer(glow::FRONT);
-        gl.read_pixels(
-            0,
-            0,
-            width as i32,
-            height as i32,
-            glow::RGBA,
-            glow::UNSIGNED_BYTE,
-            glow::PixelPackData::Slice(Some(&mut pixels)),
-        );
-    }
-    write_ppm(out_ppm, width, height, &pixels);
-    println!("headless render written to {out_ppm}");
-}
-
-fn write_ppm(path: &str, width: u32, height: u32, rgba: &[u8]) {
-    let mut out = format!("P6\n{width} {height}\n255\n").into_bytes();
-    // GL's origin is bottom-left; flip vertically for the image.
-    for y in (0..height).rev() {
-        for x in 0..width {
-            let i = ((y * width + x) * 4) as usize;
-            out.extend_from_slice(&[rgba[i], rgba[i + 1], rgba[i + 2]]);
-        }
-    }
-    std::fs::write(path, out).expect("write ppm");
-}
-
-struct App {
-    model: Option<LoadedModel>,
-    path: Option<String>,
-    viewer: Option<Viewer>,
-}
-
-impl ApplicationHandler for App {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.viewer.is_none() {
-            let model = self.model.take().expect("model set before run");
-            let path = self.path.take().unwrap_or_default();
-            self.viewer = Some(Viewer::new(event_loop, model, path));
-        }
-    }
-
-    fn window_event(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        _id: WindowId,
-        event: WindowEvent,
-    ) {
-        let Some(viewer) = &mut self.viewer else {
-            return;
+            "??:??:??".to_string()
         };
-        let egui_consumed = viewer
-            .egui_state
-            .on_window_event(&viewer.window, &event)
-            .consumed;
-        match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::Resized(size) => {
-                viewer.size = (size.width.max(1), size.height.max(1));
-                if let (Some(w), Some(h)) = (
-                    std::num::NonZeroU32::new(size.width),
-                    std::num::NonZeroU32::new(size.height),
-                ) {
-                    viewer.surface.resize(&viewer._context, w, h);
-                }
-            }
-            WindowEvent::RedrawRequested => viewer.render_frame(),
-            WindowEvent::MouseInput { state, button, .. } if !egui_consumed => {
-                viewer.dragging = if state == ElementState::Pressed {
-                    Some(button)
-                } else {
-                    None
-                };
-            }
-            WindowEvent::CursorMoved { position, .. } if !egui_consumed => {
-                let dx = position.x - viewer.last_cursor.0;
-                let dy = position.y - viewer.last_cursor.1;
-                viewer.last_cursor = (position.x, position.y);
-                match viewer.dragging {
-                    Some(MouseButton::Left) => {
-                        viewer.camera.yaw += dx as f32 * 0.01;
-                        viewer.camera.pitch =
-                            (viewer.camera.pitch + dy as f32 * 0.01).clamp(-1.5, 1.5);
-                    }
-                    Some(MouseButton::Right) => {
-                        let s = viewer.camera.dist * 0.002;
-                        viewer.camera.target.x -= dx as f32 * s;
-                        viewer.camera.target.y += dy as f32 * s;
-                    }
-                    _ => {}
-                }
-            }
-            WindowEvent::MouseWheel { delta, .. } if !egui_consumed => match delta {
-                MouseScrollDelta::LineDelta(_, y) => {
-                    viewer.camera.dist =
-                        (viewer.camera.dist * (1.0 - y * 0.1)).clamp(0.2, 50.0);
-                }
-                MouseScrollDelta::PixelDelta(p) => {
-                    viewer.camera.dist =
-                        (viewer.camera.dist * (1.0 - p.y as f32 * 0.001)).clamp(0.2, 50.0);
-                }
-            },
-            WindowEvent::DroppedFile(path) => {
-                let path = path.display().to_string();
-                viewer.path_input = path.clone();
-                viewer.status = Some(match viewer.load_model(&path) {
-                    Ok(()) => format!("loaded {path}"),
-                    Err(e) => e,
-                });
-            }
-            // Keyboard shortcuts must always work: egui consumes keys whenever
-            // a widget has keyboard focus (e.g. after clicking a slider), but
-            // that must not disable `1`..`=`/`r`.
-            WindowEvent::KeyboardInput { event, .. } => {
-                if event.state != ElementState::Pressed {
-                    return;
-                }
-                match &event.logical_key {
-                    Key::Named(NamedKey::Escape) => event_loop.exit(),
-                    Key::Character(ch) => {
-                        use ExpressionPreset::*;
-                        let preset = match ch.as_str() {
-                            "1" => Some(Happy),
-                            "2" => Some(Angry),
-                            "3" => Some(Sad),
-                            "4" => Some(Surprised),
-                            "5" => Some(Relaxed),
-                            "6" => Some(Blink),
-                            "7" => Some(Neutral),
-                            "8" => Some(Aa),
-                            "9" => Some(Ih),
-                            "0" => Some(Ou),
-                            "-" => Some(Oh),
-                            "=" => Some(Ee),
-                            _ => None,
-                        };
-                        if let Some(preset) = preset {
-                            viewer.apply_expression(preset, 1.0);
-                        } else if ch == "r" {
-                            viewer.model.vrm.reset_pose();
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-        if let Some(viewer) = &self.viewer {
-            viewer.window.request_redraw();
-        }
-    }
+        format!("vrm-viewer {hash} build {time}")
+    })
 }
 
 fn main() {
-    let args: Vec<String> = std::env::args().collect();
-    let path = args
-        .get(1)
-        .cloned()
-        .unwrap_or_else(|| "fixtures/AvatarSample_A.vrm".to_string());
+    // Model source, most specific first:
+    //   1. CLI argument (absolute or relative filesystem path)
+    //   2. The bundled fixture, resolved from the package dir so the binary
+    //      works no matter which directory it is launched from.
+    let default_model = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../fixtures/AvatarSample_A.vrm"
+    );
+    let model = std::env::args().nth(1).unwrap_or_else(|| default_model.to_string());
 
-    let model = vrm_engine::load_glb_from_path(&path)
-        .unwrap_or_else(|e| panic!("failed to load {path}: {e}"));
+    App::new()
+        .insert_resource(ClearColor(Color::linear_rgb(0.12, 0.14, 0.17)))
+        .insert_resource(Settings {
+            model,
+            loaded: String::new(),
+        })
+        .add_plugins((
+            // Model paths are absolute (CLI arg / dropped file / baked
+            // fixture path); Bevy denies loading files outside the asset root
+            // unless explicitly allowed.
+            DefaultPlugins.set(AssetPlugin {
+                meta_check: AssetMetaCheck::Never,
+                unapproved_path_mode: bevy::asset::UnapprovedPathMode::Allow,
+                ..default()
+            }),
+            EguiPlugin::default(),
+            PanOrbitCameraPlugin,
+            VrmPlugins,
+        ))
+        .add_systems(Startup, setup)
+        .add_systems(EguiPrimaryContextPass, update_ui)
+        .add_systems(Update, (load_model, read_dropped_files))
+        // `bevy_world_serialization` spawns VRM scenes through the type
+        // registry; with a minimal bevy feature set nothing registers the
+        // standard scene components, and spawn panics on the first missing
+        // one. Register them explicitly.
+        .register_type::<Transform>()
+        .register_type::<GlobalTransform>()
+        .register_type::<Visibility>()
+        .register_type::<InheritedVisibility>()
+        .register_type::<ViewVisibility>()
+        .register_type::<Name>()
+        .register_type::<ChildOf>()
+        .register_type::<Children>()
+        .run();
+}
 
-    // Optional off-screen render (no window): `VRM_VIEWER_HEADLESS_PPM=out.ppm`.
-    if let Ok(out) = std::env::var("VRM_VIEWER_HEADLESS_PPM") {
-        drop(model);
-        headless_render(&path, &out);
+#[derive(Resource)]
+struct Settings {
+    /// Filesystem/asset path of the VRM to display.
+    model: String,
+    /// The path that has actually been spawned, so we only reload on change.
+    loaded: String,
+}
+
+fn setup(mut commands: Commands) {
+    // Orbit camera framing the avatar head/chest.
+    commands.spawn((
+        Transform::from_xyz(0.0, 1.3, 3.0),
+        PanOrbitCamera {
+            focus: Vec3::new(0.0, 0.9, 0.0),
+            ..default()
+        },
+    ));
+
+    // Single directional light driving the MToon shading (`MtoonSun` is the
+    // marker `bevy_shader_mtoon` looks for to feed `light_dir`/`light_color`).
+    // Shadow maps stay off: on the software Vulkan pipeline (llvmpipe) they
+    // dominate frame time, and MToon's shade band does not depend on them.
+    commands.spawn((
+        DirectionalLight {
+            illuminance: 10_000.0,
+            shadow_maps_enabled: false,
+            ..default()
+        },
+        Transform::from_rotation(Quat::from_euler(
+            EulerRot::ZYX,
+            0.0,
+            -PI / 4.0,
+            -PI / 3.0,
+        )),
+        MtoonSun,
+    ));
+}
+
+fn load_model(
+    asset_server: Res<AssetServer>,
+    mut commands: Commands,
+    mut settings: ResMut<Settings>,
+    vrms: Query<Entity, With<VrmInstance>>,
+) {
+    if settings.model == settings.loaded {
         return;
     }
+    // Despawn the previous avatar (single live instance at a time).
+    for entity in vrms.iter() {
+        commands.entity(entity).despawn();
+    }
+    let mut transform = Transform::default();
+    // VRM avatars face -Z by convention; turn them toward the camera.
+    transform.rotate_y(PI);
+    commands.spawn((transform, VrmInstance(asset_server.load(settings.model.clone()))));
+    settings.loaded = settings.model.clone();
+}
 
-    println!(
-        "loaded {} (VRM {}): {} nodes, {} meshes, {} spring groups",
-        model_path(&model),
-        model.vrm.version,
-        model.vrm.node_count(),
-        model.vrm.doc.meshes().len(),
-        model.vrm.spring_bones.groups.len(),
-    );
-    println!(
-        "controls: LMB orbit, RMB pan, wheel zoom, 1-0/-= expressions, r reset, Esc quit"
-    );
+fn read_dropped_files(mut events: MessageReader<FileDragAndDrop>, mut settings: ResMut<Settings>) {
+    for event in events.read() {
+        if let FileDragAndDrop::DroppedFile { path_buf, .. } = event {
+            let path = path_buf.to_string_lossy().to_string();
+            info!("DroppedFile: {path}");
+            settings.model = path;
+        }
+    }
+}
 
-    let event_loop = EventLoop::new().expect("event loop");
-    event_loop.set_control_flow(ControlFlow::Poll);
-
-    let mut app = App {
-        model: Some(model),
-        path: Some(path),
-        viewer: None,
+fn update_ui(mut contexts: EguiContexts, mut settings: ResMut<Settings>) {
+    let Ok(ctx) = contexts.ctx_mut() else {
+        return;
     };
-    event_loop.run_app(&mut app).expect("run app");
+    bevy_egui::egui::Window::new("VRM Viewer")
+        .resizable(false)
+        .show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Model path:");
+                ui.text_edit_singleline(&mut settings.model);
+                if ui.button("Load").clicked() {
+                    // `settings.model` is already mutated by the text edit;
+                    // `load_model` will pick up the change next frame.
+                }
+            });
+            ui.label("Drop a .vrm file into the window to load it.");
+            ui.separator();
+            ui.label(build_label());
+        });
 }

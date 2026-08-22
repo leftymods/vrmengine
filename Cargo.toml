@@ -1,18 +1,53 @@
 [workspace]
-members = ["crates/*", "examples/*"]
+members = ["examples/vrm-viewer"]
 resolver = "2"
 
 [workspace.package]
-edition = "2021"
+edition = "2024"
 license = "Apache-2.0"
-rust-version = "1.68"
 
 [workspace.dependencies]
-glam = "0.29"
-gltf = { version = "1", features = ["utils", "extensions"] }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-vrm-spec = { git = "https://github.com/pixiv/vrm-utils-rs" }
+# Bevy stack shared by the vrm-viewer (mirrors the bevy_vrm 0.4 workspace so
+# all crates resolve to the same versions).
+bevy = { version = "0.19", default-features = false, features = [
+  "bevy_asset",
+  "bevy_log",
+  "bevy_pbr",
+  "bevy_render",
+  "bevy_core_pipeline",
+  "bevy_window",
+  "bevy_winit",
+  "bevy_gltf",
+  "bevy_animation",
+  "bevy_scene",
+  "bevy_world_serialization",
+  "multi_threaded",
+  "sysinfo_plugin",
+  "jpeg",
+  "png",
+  "tonemapping_luts",
+  "x11",
+  # bevy_world_serialization spawns VRM scenes through the type registry;
+  # without automatic reflection registration Transform/GlobalTransform etc.
+  # are missing and scene spawn panics with "unregistered type". This is the
+  # same inventory-based variant bevy's own `default_app` enables.
+  "reflect_auto_register",
+] }
+bevy_egui = { version = "0.41", default-features = false, features = [
+  "default_fonts",
+  "open_url",
+  "render",
+] }
+bevy_panorbit_camera = { version = "0.35", features = ["bevy_egui"] }
+bevy_vrm = { git = "https://github.com/unavi-xyz/bevy_vrm", tag = "v0.4.0" }
 
 [profile.release]
+opt-level = 3
+
+# Bevy dev builds are unusably slow without inlining; match the upstream
+# bevy_vrm profile so interactive runs stay responsive.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
 opt-level = 3
